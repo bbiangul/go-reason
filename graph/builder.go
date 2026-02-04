@@ -26,6 +26,7 @@ func estimateTokens(text string) int {
 // optimised for 7B-class models.
 const entityExtractionPrompt = `You are an entity extraction engine for technical and industrial documents.
 Given the following text chunk, extract all entities (nouns: things, standards, parts, people, organisations, concepts).
+Also detect the language of the text and provide an English canonical name for each entity.
 
 ENTITY TYPES (use exactly these values):
 - person       : a named individual
@@ -36,28 +37,32 @@ ENTITY TYPES (use exactly these values):
 - term         : a defined technical term, abbreviation, part number, model number, or identifier
 - regulation   : a law, directive, or regulatory framework
 
-Return a JSON object with exactly one key:
-  "entities" : array of {"name": string, "type": string, "description": string}
+Return a JSON object with exactly these keys:
+  "language" : string (language name in English, e.g. "Spanish", "English", "French")
+  "entities" : array of {"name": string, "type": string, "description": string, "name_en": string}
+
+The "name_en" field is the English translation of the entity name. If the text is already in English, "name_en" should be the same as "name".
 
 Rules:
 - Entity names must be normalised to lowercase.
+- Entity name_en must also be normalised to lowercase.
 - Only include entities clearly supported by the text.
-- If there are none, return an empty array.
+- If there are none, return an empty entities array.
 - Do NOT include any text outside the JSON object.
 
 EXAMPLES:
 
 Input: "The AV-FM fire damper complies with EN 1366-2 and is rated for 120VAC operation. Part number E1375 Rev G02."
 Output:
-{"entities": [{"name": "av-fm", "type": "term", "description": "Fire damper model"}, {"name": "en 1366-2", "type": "standard", "description": "Fire resistance test standard for dampers"}, {"name": "e1375", "type": "term", "description": "Part number for the fire damper"}, {"name": "rev g02", "type": "term", "description": "Revision code G02"}, {"name": "120vac", "type": "term", "description": "Operating voltage specification"}, {"name": "fire damper", "type": "concept", "description": "A device to prevent fire spread through ducts"}]}
+{"language": "English", "entities": [{"name": "av-fm", "type": "term", "description": "Fire damper model", "name_en": "av-fm"}, {"name": "en 1366-2", "type": "standard", "description": "Fire resistance test standard for dampers", "name_en": "en 1366-2"}, {"name": "e1375", "type": "term", "description": "Part number for the fire damper", "name_en": "e1375"}, {"name": "rev g02", "type": "term", "description": "Revision code G02", "name_en": "rev g02"}, {"name": "120vac", "type": "term", "description": "Operating voltage specification", "name_en": "120vac"}, {"name": "fire damper", "type": "concept", "description": "A device to prevent fire spread through ducts", "name_en": "fire damper"}]}
 
-Input: "ISO 9001 clause 7.1 requires organisations to determine the resources needed for quality management."
+Input: "La norma ISO 9001 cláusula 7.1 requiere que las organizaciones determinen los recursos necesarios para la gestión de calidad."
 Output:
-{"entities": [{"name": "iso 9001", "type": "standard", "description": "Quality management systems standard"}, {"name": "clause 7.1", "type": "clause", "description": "Clause on resource determination in ISO 9001"}, {"name": "quality management", "type": "concept", "description": "Systematic management of quality processes"}]}
+{"language": "Spanish", "entities": [{"name": "iso 9001", "type": "standard", "description": "Norma de sistemas de gestión de calidad", "name_en": "iso 9001"}, {"name": "cláusula 7.1", "type": "clause", "description": "Cláusula sobre determinación de recursos en ISO 9001", "name_en": "clause 7.1"}, {"name": "gestión de calidad", "type": "concept", "description": "Gestión sistemática de procesos de calidad", "name_en": "quality management"}]}
 
 Input: "MIL-STD-810 specifies environmental testing at 75 PSIG and 70 dB noise level. Contact John Smith at Belimo Corp."
 Output:
-{"entities": [{"name": "mil-std-810", "type": "standard", "description": "Military standard for environmental testing"}, {"name": "75 psig", "type": "term", "description": "Pressure specification"}, {"name": "70 db", "type": "term", "description": "Noise level measurement"}, {"name": "john smith", "type": "person", "description": "Contact person"}, {"name": "belimo corp", "type": "organization", "description": "Corporation mentioned in context"}]}
+{"language": "English", "entities": [{"name": "mil-std-810", "type": "standard", "description": "Military standard for environmental testing", "name_en": "mil-std-810"}, {"name": "75 psig", "type": "term", "description": "Pressure specification", "name_en": "75 psig"}, {"name": "70 db", "type": "term", "description": "Noise level measurement", "name_en": "70 db"}, {"name": "john smith", "type": "person", "description": "Contact person", "name_en": "john smith"}, {"name": "belimo corp", "type": "organization", "description": "Corporation mentioned in context", "name_en": "belimo corp"}]}
 
 %s
 TEXT:
@@ -230,11 +235,12 @@ func (b *Builder) Build(ctx context.Context, docID int64, chunks []store.Chunk, 
 		"skipped", len(chunks)-len(eligible), "concurrency", b.concurrency)
 
 	var (
-		mu        sync.Mutex
-		wg        sync.WaitGroup
-		sem       = make(chan struct{}, b.concurrency)
-		errs      []string
-		completed int
+		mu         sync.Mutex
+		wg         sync.WaitGroup
+		sem        = make(chan struct{}, b.concurrency)
+		errs       []string
+		completed  int
+		langVotes  = make(map[string]int)
 		buildStart = time.Now()
 	)
 
@@ -261,7 +267,8 @@ func (b *Builder) Build(ctx context.Context, docID int64, chunks []store.Chunk, 
 			defer cancel()
 
 			chunkStart := time.Now()
-			if err := b.processChunk(chunkCtx, chunk, chunkID); err != nil {
+			lang, err := b.processChunk(chunkCtx, chunk, chunkID)
+			if err != nil {
 				slog.Warn("graph: chunk failed",
 					"chunk_id", chunkID, "error", err,
 					"elapsed", time.Since(chunkStart).Round(time.Millisecond))
@@ -272,11 +279,15 @@ func (b *Builder) Build(ctx context.Context, docID int64, chunks []store.Chunk, 
 			} else {
 				mu.Lock()
 				completed++
+				if lang != "" {
+					langVotes[lang]++
+				}
 				n := completed
 				mu.Unlock()
 				slog.Info("graph: chunk processed",
 					"progress", fmt.Sprintf("%d/%d", n, total),
 					"chunk_id", chunkID,
+					"language", lang,
 					"elapsed", time.Since(chunkStart).Round(time.Millisecond),
 					"total_elapsed", time.Since(buildStart).Round(time.Millisecond))
 			}
@@ -292,6 +303,28 @@ func (b *Builder) Build(ctx context.Context, docID int64, chunks []store.Chunk, 
 		slog.Warn("graph: build completed with failures",
 			"succeeded", len(eligible)-len(errs), "failed", len(errs), "total", len(eligible))
 	}
+
+	// Determine consensus language via majority vote and store on document.
+	if len(langVotes) > 0 {
+		var bestLang string
+		var bestCount int
+		for lang, count := range langVotes {
+			if count > bestCount {
+				bestCount = count
+				bestLang = lang
+			}
+		}
+		if bestLang != "" {
+			if err := b.store.UpdateDocumentLanguage(ctx, docID, bestLang); err != nil {
+				slog.Warn("graph: failed to update document language",
+					"doc_id", docID, "language", bestLang, "error", err)
+			} else {
+				slog.Info("graph: document language set",
+					"doc_id", docID, "language", bestLang, "votes", langVotes)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -325,6 +358,7 @@ func extractJSON(raw string) (string, error) {
 
 // entityResult is the JSON shape returned by the entity extraction LLM call.
 type entityResult struct {
+	Language string            `json:"language"`
 	Entities []ExtractedEntity `json:"entities"`
 }
 
@@ -337,7 +371,8 @@ type relationshipResult struct {
 // extractEntities calls the LLM with a focused entity-only prompt.
 // Pre-extracted identifiers are included as hints so the model does not miss
 // structured data like part numbers, standards, and measurements.
-func (b *Builder) extractEntities(ctx context.Context, chunk store.Chunk) ([]ExtractedEntity, error) {
+// Returns the extracted entities and the detected language of the chunk.
+func (b *Builder) extractEntities(ctx context.Context, chunk store.Chunk) ([]ExtractedEntity, string, error) {
 	identifiers := preExtractIdentifiers(chunk.Content)
 
 	var hintsSection string
@@ -358,20 +393,20 @@ func (b *Builder) extractEntities(ctx context.Context, chunk store.Chunk) ([]Ext
 		ResponseFormat: "json_object",
 	})
 	if err != nil {
-		return nil, fmt.Errorf("entity extraction llm chat: %w", err)
+		return nil, "", fmt.Errorf("entity extraction llm chat: %w", err)
 	}
 
 	jsonStr, err := extractJSON(resp.Content)
 	if err != nil {
-		return nil, fmt.Errorf("parsing entity extraction result: %w", err)
+		return nil, "", fmt.Errorf("parsing entity extraction result: %w", err)
 	}
 
 	var result entityResult
 	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
-		return nil, fmt.Errorf("unmarshalling entity extraction result: %w", err)
+		return nil, "", fmt.Errorf("unmarshalling entity extraction result: %w", err)
 	}
 
-	return result.Entities, nil
+	return result.Entities, result.Language, nil
 }
 
 // extractRelationships calls the LLM with the known entities and asks it to
@@ -420,12 +455,12 @@ func (b *Builder) extractRelationships(ctx context.Context, chunk store.Chunk, e
 
 // processChunk orchestrates the multi-step extraction pipeline for a single
 // chunk: first extracts entities, then extracts relationships given those
-// entities, and finally persists the results.
-func (b *Builder) processChunk(ctx context.Context, chunk store.Chunk, chunkID int64) error {
+// entities, and finally persists the results. Returns the detected language.
+func (b *Builder) processChunk(ctx context.Context, chunk store.Chunk, chunkID int64) (string, error) {
 	// Step 1: Extract entities (atomic LLM call).
-	entities, err := b.extractEntities(ctx, chunk)
+	entities, language, err := b.extractEntities(ctx, chunk)
 	if err != nil {
-		return fmt.Errorf("step 1 (entities): %w", err)
+		return "", fmt.Errorf("step 1 (entities): %w", err)
 	}
 
 	// Step 2: Extract relationships using the found entities (atomic LLM call).
@@ -457,11 +492,14 @@ func (b *Builder) processChunk(ctx context.Context, chunk store.Chunk, chunkID i
 			eType = EntityConcept
 		}
 
+		nameEN := strings.TrimSpace(strings.ToLower(e.NameEN))
+
 		// Upsert + link in a single transaction to avoid FK race conditions.
 		id, err := b.store.UpsertEntityAndLink(ctx, store.Entity{
 			Name:        name,
 			EntityType:  eType,
 			Description: e.Description,
+			NameEN:      nameEN,
 		}, chunkID)
 		if err != nil {
 			slog.Warn("graph: entity upsert+link failed, skipping",
@@ -517,5 +555,5 @@ func (b *Builder) processChunk(ctx context.Context, chunk store.Chunk, chunkID i
 		}
 	}
 
-	return nil
+	return language, nil
 }

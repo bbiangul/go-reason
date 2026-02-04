@@ -41,6 +41,23 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version:     3,
+		description: "add multi-language support: documents.language, entities.name_en",
+		apply: func(tx *sql.Tx) error {
+			stmts := []string{
+				"ALTER TABLE documents ADD COLUMN language TEXT",
+				"ALTER TABLE entities ADD COLUMN name_en TEXT",
+				"CREATE INDEX IF NOT EXISTS idx_entities_name_en ON entities(name_en)",
+			}
+			for _, stmt := range stmts {
+				if _, err := tx.Exec(stmt); err != nil {
+					slog.Debug("migration 3: statement may already be applied", "sql", stmt, "error", err)
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // Migrate runs all pending schema migrations.

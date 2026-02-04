@@ -274,6 +274,12 @@ func (e *Engine) graphSearchWithEntities(ctx context.Context, entities []string,
 		slog.Warn("retrieval: fuzzy entity search failed", "error", err)
 	}
 
+	// Also search by English canonical name for cross-language entity matching
+	enFound, err := e.store.SearchEntitiesByNameEN(ctx, entities, 50)
+	if err != nil {
+		slog.Warn("retrieval: name_en entity search failed", "error", err)
+	}
+
 	// Merge results (deduplicate by ID)
 	seen := make(map[int64]bool)
 	var allEntities []store.Entity
@@ -289,6 +295,12 @@ func (e *Engine) graphSearchWithEntities(ctx context.Context, entities []string,
 			allEntities = append(allEntities, e)
 		}
 	}
+	for _, e := range enFound {
+		if !seen[e.ID] {
+			seen[e.ID] = true
+			allEntities = append(allEntities, e)
+		}
+	}
 
 	if len(allEntities) == 0 {
 		return nil, nil
@@ -296,7 +308,7 @@ func (e *Engine) graphSearchWithEntities(ctx context.Context, entities []string,
 
 	slog.Debug("retrieval: graph entity lookup",
 		"exact_matches", len(found), "fuzzy_matches", len(fuzzyFound),
-		"total_unique", len(allEntities))
+		"name_en_matches", len(enFound), "total_unique", len(allEntities))
 
 	entityIDs := make([]int64, len(allEntities))
 	for i, e := range allEntities {

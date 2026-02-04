@@ -55,6 +55,7 @@ type Chunk struct {
 type Entity struct {
 	ID          int64  `json:"id"`
 	Name        string `json:"name"`
+	NameEN      string `json:"name_en"`
 	EntityType  string `json:"entity_type"`
 	Description string `json:"description"`
 	EmbeddingID *int64 `json:"embedding_id,omitempty"`
@@ -522,12 +523,13 @@ func (s *Store) FTSSearch(ctx context.Context, query string, limit int) ([]Retri
 // UpsertEntity inserts or updates an entity. Returns the entity ID.
 func (s *Store) UpsertEntity(ctx context.Context, e Entity) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO entities (name, entity_type, description, metadata)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO entities (name, entity_type, description, name_en, metadata)
+		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(name, entity_type) DO UPDATE SET
 			description = COALESCE(excluded.description, entities.description),
+			name_en = COALESCE(excluded.name_en, entities.name_en),
 			metadata = excluded.metadata
-	`, e.Name, e.EntityType, e.Description, e.Metadata)
+	`, e.Name, e.EntityType, e.Description, e.NameEN, e.Metadata)
 	if err != nil {
 		return 0, err
 	}
@@ -553,12 +555,13 @@ func (s *Store) UpsertEntityAndLink(ctx context.Context, e Entity, chunkID int64
 	var id int64
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx, `
-			INSERT INTO entities (name, entity_type, description, metadata)
-			VALUES (?, ?, ?, ?)
+			INSERT INTO entities (name, entity_type, description, name_en, metadata)
+			VALUES (?, ?, ?, ?, ?)
 			ON CONFLICT(name, entity_type) DO UPDATE SET
 				description = COALESCE(excluded.description, entities.description),
+				name_en = COALESCE(excluded.name_en, entities.name_en),
 				metadata = excluded.metadata
-		`, e.Name, e.EntityType, e.Description, e.Metadata)
+		`, e.Name, e.EntityType, e.Description, e.NameEN, e.Metadata)
 		if err != nil {
 			return err
 		}
@@ -612,7 +615,7 @@ func (s *Store) GetEntitiesByNames(ctx context.Context, names []string) ([]Entit
 		return nil, nil
 	}
 
-	query := "SELECT id, name, entity_type, description, metadata FROM entities WHERE name IN (?" +
+	query := "SELECT id, name, entity_type, description, COALESCE(name_en, ''), metadata FROM entities WHERE name IN (?" +
 		repeatPlaceholders(len(names)-1) + ")"
 
 	args := make([]interface{}, len(names))
@@ -630,7 +633,7 @@ func (s *Store) GetEntitiesByNames(ctx context.Context, names []string) ([]Entit
 	for rows.Next() {
 		var e Entity
 		var metadata sql.NullString
-		if err := rows.Scan(&e.ID, &e.Name, &e.EntityType, &e.Description, &metadata); err != nil {
+		if err := rows.Scan(&e.ID, &e.Name, &e.EntityType, &e.Description, &e.NameEN, &metadata); err != nil {
 			return nil, err
 		}
 		e.Metadata = metadata.String
@@ -667,7 +670,7 @@ func (s *Store) SearchEntitiesByTerms(ctx context.Context, terms []string, limit
 		return nil, nil
 	}
 
-	query := "SELECT id, name, entity_type, description, metadata FROM entities WHERE " +
+	query := "SELECT id, name, entity_type, description, COALESCE(name_en, ''), metadata FROM entities WHERE " +
 		strings.Join(conditions, " OR ") +
 		" LIMIT ?"
 	args = append(args, limit)
@@ -682,7 +685,7 @@ func (s *Store) SearchEntitiesByTerms(ctx context.Context, terms []string, limit
 	for rows.Next() {
 		var e Entity
 		var metadata sql.NullString
-		if err := rows.Scan(&e.ID, &e.Name, &e.EntityType, &e.Description, &metadata); err != nil {
+		if err := rows.Scan(&e.ID, &e.Name, &e.EntityType, &e.Description, &e.NameEN, &metadata); err != nil {
 			return nil, err
 		}
 		e.Metadata = metadata.String
@@ -791,7 +794,7 @@ func (s *Store) LogQuery(ctx context.Context, q QueryLog) error {
 
 // AllEntities returns every entity in the database.
 func (s *Store) AllEntities(ctx context.Context) ([]Entity, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT id, name, entity_type, description, metadata FROM entities")
+	rows, err := s.db.QueryContext(ctx, "SELECT id, name, entity_type, description, COALESCE(name_en, ''), metadata FROM entities")
 	if err != nil {
 		return nil, err
 	}
@@ -801,7 +804,7 @@ func (s *Store) AllEntities(ctx context.Context) ([]Entity, error) {
 	for rows.Next() {
 		var e Entity
 		var metadata sql.NullString
-		if err := rows.Scan(&e.ID, &e.Name, &e.EntityType, &e.Description, &metadata); err != nil {
+		if err := rows.Scan(&e.ID, &e.Name, &e.EntityType, &e.Description, &e.NameEN, &metadata); err != nil {
 			return nil, err
 		}
 		e.Metadata = metadata.String
@@ -833,6 +836,84 @@ func (s *Store) AllRelationships(ctx context.Context) ([]Relationship, error) {
 		rels = append(rels, r)
 	}
 	return rels, rows.Err()
+}
+
+// --- Multi-language support ---
+
+// UpdateDocumentLanguage sets the detected language for a document.
+func (s *Store) UpdateDocumentLanguage(ctx context.Context, docID int64, language string) error {
+	_, err := s.db.ExecContext(ctx,
+		"UPDATE documents SET language = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+		language, docID)
+	return err
+}
+
+// GetCorpusLanguages returns the distinct non-null languages across all documents.
+func (s *Store) GetCorpusLanguages(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT DISTINCT language FROM documents WHERE language IS NOT NULL AND language != ''")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var langs []string
+	for rows.Next() {
+		var lang string
+		if err := rows.Scan(&lang); err != nil {
+			return nil, err
+		}
+		langs = append(langs, lang)
+	}
+	return langs, rows.Err()
+}
+
+// SearchEntitiesByNameEN finds entities whose English canonical name contains
+// any of the given terms as substrings. Same pattern as SearchEntitiesByTerms
+// but operates on the name_en column for cross-language entity matching.
+func (s *Store) SearchEntitiesByNameEN(ctx context.Context, terms []string, limit int) ([]Entity, error) {
+	if len(terms) == 0 {
+		return nil, nil
+	}
+	if limit == 0 {
+		limit = 50
+	}
+
+	var conditions []string
+	var args []interface{}
+	for _, t := range terms {
+		if len(t) < 4 {
+			continue
+		}
+		conditions = append(conditions, "name_en LIKE ?")
+		args = append(args, "%"+t+"%")
+	}
+	if len(conditions) == 0 {
+		return nil, nil
+	}
+
+	query := "SELECT id, name, entity_type, description, COALESCE(name_en, ''), metadata FROM entities WHERE name_en IS NOT NULL AND (" +
+		strings.Join(conditions, " OR ") +
+		") LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entities []Entity
+	for rows.Next() {
+		var e Entity
+		var metadata sql.NullString
+		if err := rows.Scan(&e.ID, &e.Name, &e.EntityType, &e.Description, &e.NameEN, &metadata); err != nil {
+			return nil, err
+		}
+		e.Metadata = metadata.String
+		entities = append(entities, e)
+	}
+	return entities, rows.Err()
 }
 
 // --- Diagnostic helpers (used by eval ground-truth checks) ---

@@ -26,6 +26,7 @@ type ExtractedEntity struct {
 	Name        string `json:"name"`
 	Type        string `json:"type"`
 	Description string `json:"description"`
+	NameEN      string `json:"name_en"`
 }
 
 // ExtractedRelationship is what the LLM returns from relationship extraction.
