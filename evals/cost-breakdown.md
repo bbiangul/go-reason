@@ -150,7 +150,46 @@ Ingestion dominates on a per-document basis, but amortizes to near-zero over que
 
 ---
 
-## 4. Notes
+## 4. Comparison: RAG vs Full-Context Window
+
+Baseline: sending the entire document (~120K tokens) in the context window for every query, using Gemini Flash pricing ($0.50/1M input, $3.00/1M output).
+
+### Per-Query Cost
+
+| | Gemini Flash (full context) | GoReason (RAG) | Savings |
+|---|---|---|---|
+| Input tokens | 120,000 | ~4,400 | 27x fewer |
+| Output tokens | ~890 | ~890 | Same |
+| Input cost | $0.0600 | $0.00066 | 91x |
+| Output cost | $0.0027 | $0.00054 | 5x |
+| **Total per query** | **$0.063** | **$0.0013** | **48x cheaper** |
+
+### At Scale
+
+| Volume | Gemini Flash | GoReason | Ratio |
+|--------|-------------|----------|-------|
+| 1 query | $0.063 | $0.22 (ingest) + $0.001 | 0.3x (ingest overhead) |
+| 4 queries | $0.25 | $0.23 | **Break-even** |
+| 140 queries | $8.77 | $0.40 | **22x cheaper** |
+| 1,000 queries | $62.70 | $1.52 | **41x cheaper** |
+| 10,000 queries | $627 | $13.22 | **47x cheaper** |
+
+GoReason breaks even at ~4 queries per document. After that the gap widens because ingestion is one-time while full-context re-uploads the entire document on every query.
+
+### Why the Gap Widens
+
+| Factor | Full Context | GoReason |
+|--------|-------------|----------|
+| Input per query | 120,000 tokens (full doc) | ~4,200 tokens (25 chunks) |
+| Scales with | query count × doc size | query count × chunk window |
+| Document re-read | Every query | Never (indexed once) |
+| Marginal cost at 10K queries | $627 | $13 |
+
+The fundamental difference: full-context pays O(doc_size) per query. RAG pays O(doc_size) once at ingestion, then O(chunk_window) per query. For a 120K-token document with a 4K-token retrieval window, that's a 30x input reduction on every query.
+
+---
+
+## 5. Notes
 
 - All costs based on Groq pricing for openai/gpt-oss-120b and OpenAI pricing for text-embedding-3-small as of Feb 2026.
 - Graph extraction token counts are estimates (no per-call token logging during ingestion). Actual costs may vary ±20%.
