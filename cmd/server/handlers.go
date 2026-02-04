@@ -132,6 +132,7 @@ func (h *handler) handleQuery(w http.ResponseWriter, r *http.Request) {
 		WeightVec   float64 `json:"weight_vector,omitempty"`
 		WeightFTS   float64 `json:"weight_fts,omitempty"`
 		WeightGraph float64 `json:"weight_graph,omitempty"`
+		JSONOutput  bool    `json:"json_output,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -161,6 +162,9 @@ func (h *handler) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.WeightVec > 0 || req.WeightFTS > 0 || req.WeightGraph > 0 {
 		opts = append(opts, goreason.WithWeights(req.WeightVec, req.WeightFTS, req.WeightGraph))
+	}
+	if req.JSONOutput {
+		opts = append(opts, goreason.WithJSONOutput())
 	}
 
 	answer, err := h.engine.Query(ctx, req.Question, opts...)

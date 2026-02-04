@@ -53,16 +53,17 @@ type Engine interface {
 
 // Answer represents the result of a query.
 type Answer struct {
-	Text             string                `json:"text"`
-	Confidence       float64               `json:"confidence"`
-	Sources          []Source              `json:"sources"`
-	Reasoning        []Step                `json:"reasoning"`
+	Text             string                 `json:"text"`
+	Found            *bool                  `json:"found,omitempty"`
+	Confidence       float64                `json:"confidence"`
+	Sources          []Source               `json:"sources"`
+	Reasoning        []Step                 `json:"reasoning"`
 	RetrievalTrace   *retrieval.SearchTrace `json:"retrieval_trace,omitempty"`
-	ModelUsed        string                `json:"model_used"`
-	Rounds           int                   `json:"rounds"`
-	PromptTokens     int                   `json:"prompt_tokens"`
-	CompletionTokens int                   `json:"completion_tokens"`
-	TotalTokens      int                   `json:"total_tokens"`
+	ModelUsed        string                 `json:"model_used"`
+	Rounds           int                    `json:"rounds"`
+	PromptTokens     int                    `json:"prompt_tokens"`
+	CompletionTokens int                    `json:"completion_tokens"`
+	TotalTokens      int                    `json:"total_tokens"`
 }
 
 // Source represents a retrieved source chunk backing an answer.
@@ -141,11 +142,12 @@ func WithMetadata(metadata map[string]string) IngestOption {
 type QueryOption func(*queryOptions)
 
 type queryOptions struct {
-	maxResults int
-	maxRounds  int
-	weightVec  float64
-	weightFTS  float64
+	maxResults  int
+	maxRounds   int
+	weightVec   float64
+	weightFTS   float64
 	weightGraph float64
+	jsonOutput  bool
 }
 
 // WithMaxResults sets the maximum number of chunks to retrieve.
@@ -156,6 +158,13 @@ func WithMaxResults(n int) QueryOption {
 // WithMaxRounds overrides the maximum reasoning rounds for this query.
 func WithMaxRounds(n int) QueryOption {
 	return func(o *queryOptions) { o.maxRounds = n }
+}
+
+// WithJSONOutput enables structured JSON output mode. When enabled, the
+// answer is post-processed into {"found": true/false, "response": "..."}.
+// The Found field on Answer is set accordingly, and Text holds the response.
+func WithJSONOutput() QueryOption {
+	return func(o *queryOptions) { o.jsonOutput = true }
 }
 
 // WithWeights overrides the retrieval weights for this query.
@@ -567,6 +576,16 @@ func (e *engine) Query(ctx context.Context, question string, opts ...QueryOption
 		})
 	}
 
+	// Structured JSON output (opt-in)
+	if options.jsonOutput {
+		jsonResult, extraPT, extraCT, _ := e.formatAnswerAsJSON(ctx, answer.Text)
+		answer.Found = &jsonResult.Found
+		answer.Text = jsonResult.Response
+		answer.PromptTokens += extraPT
+		answer.CompletionTokens += extraCT
+		answer.TotalTokens = answer.PromptTokens + answer.CompletionTokens
+	}
+
 	// Log query
 	e.store.LogQuery(ctx, store.QueryLog{
 		Query:            question,
@@ -846,6 +865,120 @@ func mergeResults(existing, extra []store.RetrievalResult) []store.RetrievalResu
 		}
 	}
 	return merged
+}
+
+// --- Structured JSON output helpers ---
+
+// jsonOutputResult is the parsed result from the JSON formatting step.
+type jsonOutputResult struct {
+	Found    bool   `json:"found"`
+	Response string `json:"response"`
+}
+
+// notFoundKeywords are phrases that indicate the document doesn't contain the answer.
+var notFoundKeywords = []string{
+	"not found",
+	"not mentioned",
+	"no information",
+	"no mention",
+	"not specified",
+	"not addressed",
+	"not discussed",
+	"not covered",
+	"does not contain",
+	"does not mention",
+	"does not address",
+	"does not discuss",
+	"does not provide",
+	"does not include",
+	"no relevant",
+	"unable to find",
+	"unable to determine",
+	"cannot determine",
+	"cannot be determined",
+	"insufficient information",
+	"no data",
+	"no evidence",
+	"not available",
+	"not present",
+}
+
+const jsonFormatPrompt = `Convert the following answer into a JSON object with exactly two fields:
+- "found": boolean — true if the answer contains substantive information that addresses the question, false if it says the information was not found or is unavailable.
+- "response": string — the answer text, cleaned up if needed.
+
+Answer to convert:
+%s
+
+Respond with ONLY the JSON object, no other text.`
+
+const jsonRetryPrompt = `You must respond with a valid JSON object. No other text, no markdown fences.
+
+The JSON object must have exactly these fields:
+{"found": <true or false>, "response": "<the answer text>"}
+
+"found" must be true if the text below contains a substantive answer, or false if it says the information is not found/unavailable.
+
+Text:
+%s`
+
+// formatAnswerAsJSON converts a free-text answer into structured JSON using
+// up to 2 LLM calls with a keyword fallback as the final safety net.
+func (e *engine) formatAnswerAsJSON(ctx context.Context, answerText string) (*jsonOutputResult, int, int, error) {
+	// Attempt 1: LLM call with json_object format
+	result, pt, ct, err := e.tryJSONFormat(ctx, fmt.Sprintf(jsonFormatPrompt, answerText))
+	if err == nil {
+		return result, pt, ct, nil
+	}
+	slog.Debug("json format attempt 1 failed, retrying", "error", err)
+
+	// Attempt 2: stricter prompt
+	result2, pt2, ct2, err := e.tryJSONFormat(ctx, fmt.Sprintf(jsonRetryPrompt, answerText))
+	pt += pt2
+	ct += ct2
+	if err == nil {
+		return result2, pt, ct, nil
+	}
+	slog.Debug("json format attempt 2 failed, falling back to keywords", "error", err)
+
+	// Attempt 3: keyword fallback (always succeeds)
+	return keywordFallback(answerText), pt, ct, nil
+}
+
+// tryJSONFormat makes a single LLM call with ResponseFormat json_object and
+// tries to parse the result.
+func (e *engine) tryJSONFormat(ctx context.Context, prompt string) (*jsonOutputResult, int, int, error) {
+	resp, err := e.chatLLM.Chat(ctx, llm.ChatRequest{
+		Messages: []llm.Message{
+			{Role: "user", Content: prompt},
+		},
+		Temperature:    0.0,
+		ResponseFormat: "json_object",
+	})
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("llm chat: %w", err)
+	}
+
+	var result jsonOutputResult
+	if err := json.Unmarshal([]byte(resp.Content), &result); err != nil {
+		return nil, resp.PromptTokens, resp.CompletionTokens, fmt.Errorf("json unmarshal: %w", err)
+	}
+	if result.Response == "" {
+		return nil, resp.PromptTokens, resp.CompletionTokens, fmt.Errorf("empty response field")
+	}
+	return &result, resp.PromptTokens, resp.CompletionTokens, nil
+}
+
+// keywordFallback scans the answer text for "not found" indicators and returns
+// a jsonOutputResult. This always succeeds and is the final fallback.
+func keywordFallback(answerText string) *jsonOutputResult {
+	lower := strings.ToLower(answerText)
+	for _, kw := range notFoundKeywords {
+		if strings.Contains(lower, kw) {
+			return &jsonOutputResult{Found: false, Response: answerText}
+		}
+	}
+	return &jsonOutputResult{Found: true, Response: answerText}
 }
 
 // fileHash computes the SHA-256 hash of a file's content.
