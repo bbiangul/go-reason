@@ -7,7 +7,7 @@
 
 # Build output
 /goreason-server
-/eval
+/goreason-eval
 
 # Test binary, coverage
 *.test
@@ -39,6 +39,9 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+
+# Stray SQLite WAL URL files
+\?_journal_mode=*
 
 # Evaluation artifacts
 eval-report*.json

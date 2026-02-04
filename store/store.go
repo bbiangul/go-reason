@@ -738,6 +738,61 @@ func (s *Store) GraphSearch(ctx context.Context, entityIDs []int64, limit int) (
 	return results, rows.Err()
 }
 
+// GetRelatedEntities performs a 1-hop expansion from the given seed entity IDs
+// via the relationships table, returning entities that are directly connected
+// but not already in the seed set. Used by synthesis-mode retrieval to discover
+// semantically distant entities (e.g., from "seguridad y normativa" → "ip54").
+func (s *Store) GetRelatedEntities(ctx context.Context, entityIDs []int64, limit int) ([]Entity, error) {
+	if len(entityIDs) == 0 {
+		return nil, nil
+	}
+	if limit == 0 {
+		limit = 100
+	}
+
+	// Build placeholders for the IN clauses
+	ph := "?" + repeatPlaceholders(len(entityIDs)-1)
+
+	query := `
+		SELECT DISTINCT e.id, e.name, e.entity_type, e.description, COALESCE(e.name_en, ''), e.metadata
+		FROM entities e
+		JOIN relationships r ON (e.id = r.target_entity_id OR e.id = r.source_entity_id)
+		WHERE (r.source_entity_id IN (` + ph + `) OR r.target_entity_id IN (` + ph + `))
+		  AND e.id NOT IN (` + ph + `)
+		LIMIT ?`
+
+	// Args: source IN (?...) OR target IN (?...) AND e.id NOT IN (?...) LIMIT ?
+	args := make([]interface{}, 0, len(entityIDs)*3+1)
+	for _, id := range entityIDs {
+		args = append(args, id)
+	}
+	for _, id := range entityIDs {
+		args = append(args, id)
+	}
+	for _, id := range entityIDs {
+		args = append(args, id)
+	}
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entities []Entity
+	for rows.Next() {
+		var e Entity
+		var metadata sql.NullString
+		if err := rows.Scan(&e.ID, &e.Name, &e.EntityType, &e.Description, &e.NameEN, &metadata); err != nil {
+			return nil, err
+		}
+		e.Metadata = metadata.String
+		entities = append(entities, e)
+	}
+	return entities, rows.Err()
+}
+
 // --- Community operations ---
 
 // InsertCommunity stores a community detection result.

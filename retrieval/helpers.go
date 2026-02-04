@@ -182,6 +182,49 @@ func extractQueryEntities(query string, translated []string) []string {
 	return entities
 }
 
+// isSynthesisQuery returns true if the query has exhaustive intent —
+// asking for ALL items, every reference, complete lists, etc.
+// These queries benefit from a wider retrieval window because relevant
+// facts are scattered across many topically distant chunks.
+func isSynthesisQuery(query string) bool {
+	lower := strings.ToLower(query)
+
+	// Explicit exhaustive-intent phrases (English only — queries are
+	// expected in the user's language; the cross-language translator
+	// handles mapping to document content).
+	exhaustivePatterns := []string{
+		"all the", "all of the", "every ", "each of",
+		"complete list", "comprehensive", "list all",
+		"all references", "what are all", "name all",
+		"list every", "list each", "enumerate",
+		"full list", "entire list",
+		"every single",
+	}
+	for _, p := range exhaustivePatterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+
+	// Long queries (15+ words) with multiple question keywords suggest
+	// broad synthesis questions rather than point lookups.
+	words := strings.Fields(lower)
+	if len(words) >= 15 {
+		qWords := 0
+		for _, w := range words {
+			switch w {
+			case "what", "which", "how", "where", "when", "why", "list", "describe", "name":
+				qWords++
+			}
+		}
+		if qWords >= 2 {
+			return true
+		}
+	}
+
+	return false
+}
+
 var stopWords = map[string]bool{
 	"the": true, "a": true, "an": true, "and": true, "or": true,
 	"but": true, "in": true, "on": true, "at": true, "to": true,

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -463,6 +464,71 @@ func (e *engine) Query(ctx context.Context, question string, opts ...QueryOption
 		return nil, fmt.Errorf("reasoning: %w", err)
 	}
 
+	// Follow-up retrieval for synthesis queries with a full initial window.
+	// When the first retrieval filled the entire result window, there are
+	// likely more relevant chunks we didn't see. Extract identifiers from
+	// the round-1 answer that don't appear in retrieved chunks (these may
+	// be hallucinated or from LLM prior knowledge) and do a targeted FTS
+	// search to find supporting evidence or disprove them.
+	//
+	// Gate: compare against FusedResults (the actual window size after
+	// synthesis widening) rather than the caller's original maxResults,
+	// so we only fire when the widened window was truly filled.
+	if searchTrace != nil && searchTrace.SynthesisMode && searchTrace.FusedResults >= searchTrace.MaxRequested {
+		// The widened window was filled — there are likely more chunks.
+		missing := extractMissingTerms(rAnswer.Text, results)
+		if len(missing) > 0 {
+			slog.Debug("retrieval: synthesis follow-up",
+				"missing_terms", missing, "count", len(missing))
+
+			// Replace hyphens with spaces so FTS tokenisation matches the
+			// index (FTS5 treats hyphens as separators). E.g. "ISO 13849-1"
+			// becomes "ISO 13849 1" → tokens match the indexed content.
+			ftsTerms := make([]string, len(missing))
+			for i, m := range missing {
+				ftsTerms[i] = strings.ReplaceAll(m, "-", " ")
+			}
+			ftsQuery := strings.Join(ftsTerms, " OR ")
+
+			extraResults, followTrace, ferr := e.retriever.Search(ctx, ftsQuery, retrieval.SearchOptions{
+				MaxResults:  15,
+				WeightFTS:   2.0,
+				WeightVec:   0.5,
+				WeightGraph: 1.0,
+			})
+
+			// Record follow-up in the original trace for diagnostics.
+			searchTrace.FollowUpTerms = missing
+			if followTrace != nil {
+				searchTrace.FollowUpResults = followTrace.FusedResults
+			}
+
+			if ferr == nil && len(extraResults) > 0 {
+				merged := mergeResults(results, extraResults)
+				slog.Debug("retrieval: synthesis follow-up merged",
+					"extra", len(extraResults), "total", len(merged))
+
+				// Accumulate token counts from the first reasoning call
+				// so the final answer reflects total usage.
+				firstPromptTokens := rAnswer.PromptTokens
+				firstCompletionTokens := rAnswer.CompletionTokens
+
+				// Re-run reasoning with expanded context
+				rAnswer2, rerr := e.reasoner.Reason(ctx, question, merged, reasoning.Options{
+					MaxRounds: options.maxRounds,
+				})
+				if rerr == nil {
+					rAnswer2.PromptTokens += firstPromptTokens
+					rAnswer2.CompletionTokens += firstCompletionTokens
+					rAnswer2.TotalTokens = rAnswer2.PromptTokens + rAnswer2.CompletionTokens
+					rAnswer2.Rounds += rAnswer.Rounds
+					rAnswer = rAnswer2
+					results = merged
+				}
+			}
+		}
+	}
+
 	// Convert reasoning.Answer -> goreason.Answer
 	answer := &Answer{
 		Text:             rAnswer.Text,
@@ -692,6 +758,94 @@ func (e *engine) embedChunks(ctx context.Context, chunks []store.Chunk, chunkIDs
 		slog.Warn("some embeddings failed", "failed", failed, "total", len(chunks))
 	}
 	return nil
+}
+
+// Regex patterns for extracting technical identifiers from answer text.
+// Mirrors the patterns in graph/builder.go for consistency.
+var answerIdentifierPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(?:ISO|EN|IEC|MIL-STD|ASTM|IEEE|NIST|AS|BS)\s*[-]?\s*\d[\w.-]*`),
+	regexp.MustCompile(`(?i)(?:PN[:\s]*|P/N[:\s]*)?[A-Z]{1,3}[-]?\d{3,6}`),
+	regexp.MustCompile(`(?i)Rev\.?\s*[A-Z0-9]{1,5}`),
+	regexp.MustCompile(`\b[A-Z]{2,4}-[A-Z]{1,4}\b`),
+	regexp.MustCompile(`(?i)\d+(?:\.\d+)?\s*[Vv](?:AC|DC|ac|dc)?\b`),
+	regexp.MustCompile(`(?i)IP\s*\d{2}\b`),                          // IP ratings like IP54
+	regexp.MustCompile(`(?i)(?:UNE|NTP|ANSI|DIN|JIS|NF)\s*[-]?\s*\d[\w.-]*`), // additional standard prefixes
+}
+
+// falsePositivePrefixes filters out regex matches that are common in LLM
+// prose but are not real technical identifiers.
+var falsePositivePrefixes = []string{
+	"figure ", "fig ", "table ", "step ", "page ", "section ",
+	"chapter ", "item ", "part ", "ref ",
+}
+
+// isFalsePositiveIdentifier returns true if the matched string is likely
+// a document cross-reference rather than a real technical identifier.
+func isFalsePositiveIdentifier(ctx string, match string) bool {
+	// Check if the match is preceded by a prose prefix in the surrounding text.
+	idx := strings.Index(strings.ToLower(ctx), strings.ToLower(match))
+	if idx <= 0 {
+		return false
+	}
+	before := strings.ToLower(ctx[max(0, idx-10):idx])
+	for _, p := range falsePositivePrefixes {
+		if strings.HasSuffix(before, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// extractMissingTerms finds technical identifiers in the answer text that do
+// not appear in any of the retrieved chunks. These are candidates for targeted
+// follow-up retrieval — they may be hallucinated or sourced from the LLM's
+// prior knowledge, and finding supporting chunks improves answer grounding.
+func extractMissingTerms(answer string, chunks []store.RetrievalResult) []string {
+	// Build a single lowercase string of all retrieved content for fast lookup.
+	var buf strings.Builder
+	for _, c := range chunks {
+		buf.WriteString(strings.ToLower(c.Content))
+		buf.WriteByte(' ')
+	}
+	chunkContent := buf.String()
+
+	seen := make(map[string]bool)
+	var missing []string
+	for _, p := range answerIdentifierPatterns {
+		for _, m := range p.FindAllString(answer, -1) {
+			key := strings.ToLower(strings.TrimSpace(m))
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			if isFalsePositiveIdentifier(answer, m) {
+				continue
+			}
+			if !strings.Contains(chunkContent, key) {
+				missing = append(missing, m)
+			}
+		}
+	}
+	return missing
+}
+
+// mergeResults appends extra retrieval results to the existing set,
+// deduplicating by ChunkID. New results are appended at the end (lower
+// priority than the original set).
+func mergeResults(existing, extra []store.RetrievalResult) []store.RetrievalResult {
+	seen := make(map[int64]bool, len(existing))
+	for _, r := range existing {
+		seen[r.ChunkID] = true
+	}
+	merged := make([]store.RetrievalResult, len(existing))
+	copy(merged, existing)
+	for _, r := range extra {
+		if !seen[r.ChunkID] {
+			seen[r.ChunkID] = true
+			merged = append(merged, r)
+		}
+	}
+	return merged
 }
 
 // fileHash computes the SHA-256 hash of a file's content.

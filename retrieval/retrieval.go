@@ -69,6 +69,10 @@ type SearchTrace struct {
 	FTSWeight           float64            `json:"fts_weight"`
 	GraphWeight         float64            `json:"graph_weight"`
 	IdentifiersDetected bool               `json:"identifiers_detected"`
+	SynthesisMode       bool               `json:"synthesis_mode"`
+	MaxRequested        int                `json:"max_requested"`
+	FollowUpTerms       []string           `json:"follow_up_terms,omitempty"`
+	FollowUpResults     int                `json:"follow_up_results,omitempty"`
 	FTSQuery            string             `json:"fts_query"`
 	GraphEntities       []string           `json:"graph_entities"`
 	ElapsedMs           int64              `json:"elapsed_ms"`
@@ -133,6 +137,17 @@ func (e *Engine) Search(ctx context.Context, query string, opts SearchOptions) (
 		trace.FTSWeight = opts.WeightFTS
 	}
 
+	// Synthesis query detection: widen retrieval window for exhaustive queries
+	synthesisMode := isSynthesisQuery(query)
+	if synthesisMode {
+		if opts.MaxResults < 40 {
+			opts.MaxResults = 40
+		}
+		trace.SynthesisMode = true
+		slog.Debug("retrieval: synthesis mode activated, widened retrieval window",
+			"query", query, "max_results", opts.MaxResults)
+	}
+
 	// Run all three retrieval methods concurrently
 	slog.Debug("retrieval: starting hybrid search",
 		"query_len", len(query), "max_results", opts.MaxResults,
@@ -175,7 +190,7 @@ func (e *Engine) Search(ctx context.Context, query string, opts SearchOptions) (
 
 	// Graph search
 	go func() {
-		r, err := e.graphSearchWithEntities(ctx, graphEntities, opts.MaxResults)
+		r, err := e.graphSearchWithEntities(ctx, graphEntities, opts.MaxResults, synthesisMode)
 		graphCh <- result{r, err}
 	}()
 
@@ -203,6 +218,7 @@ func (e *Engine) Search(ctx context.Context, query string, opts SearchOptions) (
 	)
 
 	trace.FusedResults = len(fused)
+	trace.MaxRequested = opts.MaxResults
 	trace.PerResult = infoMap
 	trace.ElapsedMs = time.Since(searchStart).Milliseconds()
 
@@ -243,7 +259,7 @@ func (e *Engine) ftsSearch(ctx context.Context, query string, translated []strin
 // graphSearch extracts entities from the query and traverses the graph.
 func (e *Engine) graphSearch(ctx context.Context, query string, translated []string, limit int) ([]store.RetrievalResult, error) {
 	entities := extractQueryEntities(query, translated)
-	return e.graphSearchWithEntities(ctx, entities, limit)
+	return e.graphSearchWithEntities(ctx, entities, limit, false)
 }
 
 // graphSearchWithEntities traverses the graph using pre-extracted entity names.
@@ -252,7 +268,11 @@ func (e *Engine) graphSearch(ctx context.Context, query string, translated []str
 // query terms. This is critical for cross-language queries where single-word
 // English/Spanish terms need to match multi-word entity names like
 // "rechazador de envases" from a query containing "rejected"/"rechazado".
-func (e *Engine) graphSearchWithEntities(ctx context.Context, entities []string, limit int) ([]store.RetrievalResult, error) {
+//
+// When synthesisMode is true, performs an additional 1-hop relationship
+// expansion to discover entities connected to the initial matches but not
+// directly matched by name. This helps synthesis queries find scattered facts.
+func (e *Engine) graphSearchWithEntities(ctx context.Context, entities []string, limit int, synthesisMode bool) ([]store.RetrievalResult, error) {
 	if len(entities) == 0 {
 		return nil, nil
 	}
@@ -313,6 +333,27 @@ func (e *Engine) graphSearchWithEntities(ctx context.Context, entities []string,
 	entityIDs := make([]int64, len(allEntities))
 	for i, e := range allEntities {
 		entityIDs[i] = e.ID
+	}
+
+	// 1-hop relationship expansion for synthesis queries: discover entities
+	// connected to the seed set (e.g., "seguridad y normativa" → "ip54").
+	if synthesisMode {
+		neighborEntities, err := e.store.GetRelatedEntities(ctx, entityIDs, 100)
+		if err != nil {
+			slog.Warn("retrieval: 1-hop entity expansion failed", "error", err)
+		} else if len(neighborEntities) > 0 {
+			added := 0
+			for _, ne := range neighborEntities {
+				if !seen[ne.ID] {
+					seen[ne.ID] = true
+					allEntities = append(allEntities, ne)
+					entityIDs = append(entityIDs, ne.ID)
+					added++
+				}
+			}
+			slog.Debug("retrieval: 1-hop expansion",
+				"returned", len(neighborEntities), "new", added, "total_unique", len(allEntities))
+		}
 	}
 
 	return e.store.GraphSearch(ctx, entityIDs, limit)
