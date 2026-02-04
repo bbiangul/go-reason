@@ -142,6 +142,7 @@ Example for [Spanish, Portuguese]:
 
 If a term is the same in both languages, include it anyway.
 If a term has multiple valid translations, include all of them.
+For ambiguous terms with distinct meanings in different domains, include the top 2-3 most common translations (e.g., "cap" → both "tapa" and "mayúscula" in Spanish).
 
 Terms: %s`, langList, strings.Join(terms, ", "))
 
