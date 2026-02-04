@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/brunobiangulo/goreason"
+	"github.com/bbiangul/go-reason"
 )
 
 func main() {

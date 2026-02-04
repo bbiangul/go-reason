@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/brunobiangulo/goreason/store"
+	"github.com/bbiangul/go-reason/store"
 )
 
 func newTestStore(t *testing.T) *store.Store {

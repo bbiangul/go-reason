@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/brunobiangulo/goreason/store"
+	"github.com/bbiangul/go-reason/store"
 )
 
 // Citation represents an extracted citation from an answer.

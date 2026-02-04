@@ -26,8 +26,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/brunobiangulo/goreason"
-	"github.com/brunobiangulo/goreason/eval"
+	"github.com/bbiangul/go-reason"
+	"github.com/bbiangul/go-reason/eval"
 )
 
 func main() {

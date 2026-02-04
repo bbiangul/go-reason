@@ -14,13 +14,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/brunobiangulo/goreason/chunker"
-	"github.com/brunobiangulo/goreason/graph"
-	"github.com/brunobiangulo/goreason/llm"
-	"github.com/brunobiangulo/goreason/parser"
-	"github.com/brunobiangulo/goreason/reasoning"
-	"github.com/brunobiangulo/goreason/retrieval"
-	"github.com/brunobiangulo/goreason/store"
+	"github.com/bbiangul/go-reason/chunker"
+	"github.com/bbiangul/go-reason/graph"
+	"github.com/bbiangul/go-reason/llm"
+	"github.com/bbiangul/go-reason/parser"
+	"github.com/bbiangul/go-reason/reasoning"
+	"github.com/bbiangul/go-reason/retrieval"
+	"github.com/bbiangul/go-reason/store"
 )
 
 // Engine is the main entry point for the Graph RAG engine.

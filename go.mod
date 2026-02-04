@@ -1,4 +1,4 @@
-module github.com/brunobiangulo/goreason
+module github.com/bbiangul/go-reason
 
 go 1.25.0
 

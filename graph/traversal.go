@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/brunobiangulo/goreason/store"
+	"github.com/bbiangul/go-reason/store"
 )
 
 // TraversalResult contains entities and chunks found via graph traversal.

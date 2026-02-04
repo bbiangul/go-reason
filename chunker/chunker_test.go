@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/brunobiangulo/goreason/parser"
+	"github.com/bbiangul/go-reason/parser"
 )
 
 // ---------------------------------------------------------------------------

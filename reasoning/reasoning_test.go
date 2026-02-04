@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/brunobiangulo/goreason/store"
+	"github.com/bbiangul/go-reason/store"
 )
 
 // testChunks returns a slice of RetrievalResult for use in tests.

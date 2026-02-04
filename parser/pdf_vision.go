@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/brunobiangulo/goreason/llm"
+	"github.com/bbiangul/go-reason/llm"
 )
 
 // PDFVisionParser uses a vision LLM to extract text from complex PDF pages

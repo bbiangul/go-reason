@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/brunobiangulo/goreason"
+	"github.com/bbiangul/go-reason"
 )
 
 type handler struct {

@@ -3,7 +3,7 @@ package reasoning
 import (
 	"strings"
 
-	"github.com/brunobiangulo/goreason/store"
+	"github.com/bbiangul/go-reason/store"
 )
 
 // validationResult holds the outcome of answer validation.

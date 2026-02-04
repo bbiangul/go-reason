@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/brunobiangulo/goreason/llm"
-	"github.com/brunobiangulo/goreason/store"
+	"github.com/bbiangul/go-reason/llm"
+	"github.com/bbiangul/go-reason/store"
 )
 
 // ---------------------------------------------------------------------------

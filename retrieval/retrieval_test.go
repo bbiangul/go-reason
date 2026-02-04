@@ -3,7 +3,7 @@ package retrieval
 import (
 	"testing"
 
-	"github.com/brunobiangulo/goreason/store"
+	"github.com/bbiangul/go-reason/store"
 )
 
 func TestFuseRRF(t *testing.T) {

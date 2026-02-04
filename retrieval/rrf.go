@@ -3,7 +3,7 @@ package retrieval
 import (
 	"sort"
 
-	"github.com/brunobiangulo/goreason/store"
+	"github.com/bbiangul/go-reason/store"
 )
 
 const rrfK = 60 // RRF constant (standard value from literature)

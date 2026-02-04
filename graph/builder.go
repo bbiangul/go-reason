@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/brunobiangulo/goreason/llm"
-	"github.com/brunobiangulo/goreason/store"
+	"github.com/bbiangul/go-reason/llm"
+	"github.com/bbiangul/go-reason/store"
 )
 
 // estimateTokens approximates token count using a word-based heuristic.

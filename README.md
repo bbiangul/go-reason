@@ -30,7 +30,7 @@ sqlite-vec  entities   Porter stemmer
 - **4 Document Formats** -- PDF, DOCX, XLSX, PPTX (+ LlamaParse integration)
 - **SQLite Everything** -- Single-file database with sqlite-vec, FTS5, knowledge graph, audit log
 - **Production Middleware** -- Auth, CORS, panic recovery, graceful shutdown, structured logging
-- **Built-in Evaluation** -- 120-question benchmark suite across 4 difficulty levels
+- **Built-in Evaluation** -- 140-question benchmark suite across 4 difficulty levels
 
 ## Quick Start
 
@@ -44,8 +44,8 @@ sqlite-vec  entities   Porter stemmer
 
 ```bash
 # Clone
-git clone https://github.com/brunobiangulo/goreason.git
-cd goreason
+git clone https://github.com/bbiangul/go-reason.git
+cd go-reason
 
 # Pull models (if using Ollama)
 ollama pull llama3.1:8b
@@ -384,7 +384,7 @@ docker run -p 8080:8080 \
 
 ## Evaluation
 
-GoReason includes a built-in evaluation framework with 120 questions across 4 difficulty levels, tested against an industrial technical manual (ALTAVision AV-FM, 214 pages, Spanish).
+GoReason includes a built-in evaluation framework with 140 questions across 4 difficulty levels, tested against an industrial technical manual (ALTAVision AV-FM, 214 pages, Spanish).
 
 ### Run Evaluation
 
@@ -417,7 +417,7 @@ CGO_ENABLED=1 go run -tags sqlite_fts5 ./cmd/eval \
 | Easy | 30 | Single-fact lookup (specs, part numbers, safety) |
 | Medium | 30 | Multi-fact retrieval (GUI steps, standards, features) |
 | Hard | 30 | Multi-hop reasoning (system relationships, data flow) |
-| Super-Hard | 30 | Synthesis & inference (design rationale, troubleshooting) |
+| Super-Hard | 50 | Synthesis & inference (design rationale, troubleshooting) |
 
 ### v1 Results (Easy)
 
@@ -453,25 +453,36 @@ goreason/
     parser.go        # Interface + types
     registry.go      # Format router
     pdf.go           # Native PDF parser
+    pdf_vision.go    # Vision-based PDF parsing
     docx.go          # DOCX parser
     xlsx.go          # XLSX parser
     pptx.go          # PPTX parser
+    complexity.go    # Document complexity analysis
+    llamaparse.go    # LlamaParse integration
 
   chunker/           # Document chunking
     chunker.go       # Token-aware chunking with overlap
+    engineering.go   # Engineering document heuristics
+    legal.go         # Legal document heuristics
+    structure.go     # Document structure analysis
 
   graph/             # Knowledge graph
     builder.go       # Multi-step extraction pipeline
     entity.go        # Entity/relationship types
     community.go     # Community detection + summarization
+    traversal.go     # Graph traversal for retrieval
 
   retrieval/         # Hybrid retrieval
     retrieval.go     # Vector + FTS5 + Graph search
     rrf.go           # Reciprocal Rank Fusion
-    query.go         # Query entity extraction
+    translations.go  # Multi-language query support
+    helpers.go       # Shared utilities
 
   reasoning/         # Multi-round reasoning
     reasoning.go     # Answer, validate, refine pipeline
+    validator.go     # Answer validation
+    confidence.go    # Confidence scoring
+    citation.go      # Citation extraction
 
   store/             # SQLite persistence
     store.go         # Database operations
@@ -480,8 +491,9 @@ goreason/
 
   eval/              # Evaluation framework
     evaluator.go     # Test runner + scoring
-    dataset.go       # ALTAVision question datasets
-    report.go        # Report formatting
+    dataset.go       # Test case types
+    metrics.go       # Evaluation metrics
+    altavision_dataset.go  # 140-question benchmark
 
   cmd/
     server/          # HTTP server
@@ -492,7 +504,6 @@ goreason/
       main.go        # Eval entry point
 
   evals/             # Evaluation reports
-    v1.md            # v1 results
 
   Dockerfile         # Multi-stage production build
   docker-compose.yml # Ollama + GoReason stack
