@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main, bb]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go vet
+        run: CGO_ENABLED=1 go vet ./...
+
+  test-unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install C compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc
+      - name: Run unit tests
+        run: |
+          CGO_ENABLED=1 go test -tags sqlite_fts5 -race -coverprofile=coverage.out \
+            ./eval/ ./llm/ ./parser/ ./reasoning/ ./retrieval/ ./chunker/
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+  test-cgo:
+    name: CGO Tests (Store + Graph)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install C compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc
+      - name: Run CGO tests
+        run: |
+          CGO_ENABLED=1 go test -tags sqlite_fts5 -race -v \
+            ./store/ ./graph/
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - cmd/server
+          - cmd/eval
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install C compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc
+      - name: Build ${{ matrix.target }}
+        run: CGO_ENABLED=1 go build -tags sqlite_fts5 -o /dev/null ./${{ matrix.target }}
+
+  eval:
+    name: Evaluation (ALTAVision)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[run-eval]')
+    needs: [lint, test-unit, test-cgo, build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install C compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc
+      - name: Run evaluation
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ALTAVISION_PDF_PATH: ${{ secrets.ALTAVISION_PDF_PATH }}
+        run: |
+          CGO_ENABLED=1 go test -v -tags "eval sqlite_fts5" -timeout 60m \
+            -run TestALTAVisionEvaluation ./eval/

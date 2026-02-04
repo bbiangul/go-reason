@@ -1,0 +1,54 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  goreason:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - goreason_data:/data
+      - ./documents:/documents:ro
+    environment:
+      GOREASON_DB_PATH: /data/goreason.db
+      GOREASON_CHAT_BASE_URL: http://ollama:11434
+      GOREASON_EMBED_BASE_URL: http://ollama:11434
+      GOREASON_API_KEY: ${GOREASON_API_KEY:-}
+      GOREASON_CORS_ORIGINS: ${GOREASON_CORS_ORIGINS:-}
+    depends_on:
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+  goreason_data:
