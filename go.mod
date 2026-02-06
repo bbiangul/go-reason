@@ -1,6 +1,6 @@
 module github.com/bbiangul/go-reason
 
-go 1.25.0
+go 1.24.1
 
 require (
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
