@@ -51,6 +51,19 @@ type Chunk struct {
 	ContentHash   string `json:"content_hash"`
 }
 
+// ChunkImage represents an image associated with a chunk.
+type ChunkImage struct {
+	ID         int64  `json:"id"`
+	ChunkID    int64  `json:"chunk_id"`
+	DocumentID int64  `json:"document_id"`
+	Caption    string `json:"caption,omitempty"`
+	MIMEType   string `json:"mime_type"`
+	Width      int    `json:"width"`
+	Height     int    `json:"height"`
+	PageNumber int    `json:"page_number"`
+	Data       []byte `json:"data,omitempty"`
+}
+
 // Entity represents a row in the entities table.
 type Entity struct {
 	ID          int64  `json:"id"`
@@ -98,15 +111,18 @@ type QueryLog struct {
 
 // RetrievalResult holds a chunk with its retrieval score and document info.
 type RetrievalResult struct {
-	ChunkID    int64   `json:"chunk_id"`
-	DocumentID int64   `json:"document_id"`
-	Content    string  `json:"content"`
-	Heading    string  `json:"heading"`
-	ChunkType  string  `json:"chunk_type"`
-	PageNumber int     `json:"page_number"`
-	Filename   string  `json:"filename"`
-	Path       string  `json:"path"`
-	Score      float64 `json:"score"`
+	ChunkID       int64   `json:"chunk_id"`
+	DocumentID    int64   `json:"document_id"`
+	Content       string  `json:"content"`
+	Heading       string  `json:"heading"`
+	ChunkType     string  `json:"chunk_type"`
+	PageNumber    int     `json:"page_number"`
+	PositionInDoc int     `json:"position_in_doc"`
+	Filename      string  `json:"filename"`
+	Path          string  `json:"path"`
+	Score         float64 `json:"score"`
+	ChunkMeta     string  `json:"chunk_metadata,omitempty"`
+	DocMeta       string  `json:"doc_metadata,omitempty"`
 }
 
 // Store wraps the SQLite database for all goreason persistence.
@@ -311,6 +327,12 @@ func (s *Store) DeleteDocument(ctx context.Context, id int64) error {
 			return err
 		}
 
+		// Delete chunk images
+		if _, err := tx.ExecContext(ctx,
+			"DELETE FROM chunk_images WHERE document_id = ?", id); err != nil {
+			return err
+		}
+
 		// Delete chunks (triggers will clean up FTS)
 		if _, err := tx.ExecContext(ctx,
 			"DELETE FROM chunks WHERE document_id = ?", id); err != nil {
@@ -327,7 +349,7 @@ func (s *Store) DeleteDocument(ctx context.Context, id int64) error {
 	})
 }
 
-// DeleteDocumentData removes all chunks, embeddings, and entity data
+// DeleteDocumentData removes all chunks, embeddings, images, and entity data
 // for a document but keeps the document record itself.
 func (s *Store) DeleteDocumentData(ctx context.Context, docID int64) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
@@ -349,6 +371,11 @@ func (s *Store) DeleteDocumentData(ctx context.Context, docID int64) error {
 			DELETE FROM vec_chunks WHERE chunk_id IN (
 				SELECT id FROM chunks WHERE document_id = ?
 			)`, docID); err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx,
+			"DELETE FROM chunk_images WHERE document_id = ?", docID); err != nil {
 			return err
 		}
 
@@ -441,6 +468,75 @@ func (s *Store) GetChunksByDocument(ctx context.Context, docID int64) ([]Chunk, 
 	return chunks, rows.Err()
 }
 
+// --- Chunk image operations ---
+
+// InsertChunkImages batch-inserts images associated with chunks.
+func (s *Store) InsertChunkImages(ctx context.Context, images []ChunkImage) error {
+	if len(images) == 0 {
+		return nil
+	}
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		stmt, err := tx.PrepareContext(ctx, `
+			INSERT INTO chunk_images (chunk_id, document_id, caption, mime_type, width, height, page_number, data)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+
+		for _, img := range images {
+			if _, err := stmt.ExecContext(ctx,
+				img.ChunkID, img.DocumentID, img.Caption, img.MIMEType,
+				img.Width, img.Height, img.PageNumber, img.Data); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// GetImagesByChunkIDs returns images grouped by chunk ID.
+// When includeData is false, the Data field is left empty to avoid loading BLOBs.
+func (s *Store) GetImagesByChunkIDs(ctx context.Context, chunkIDs []int64, includeData bool) (map[int64][]ChunkImage, error) {
+	if len(chunkIDs) == 0 {
+		return nil, nil
+	}
+
+	dataCol := "NULL"
+	if includeData {
+		dataCol = "data"
+	}
+
+	query := fmt.Sprintf(`SELECT id, chunk_id, document_id, caption, mime_type, width, height, page_number, %s
+		FROM chunk_images WHERE chunk_id IN (?%s) ORDER BY id`,
+		dataCol, repeatPlaceholders(len(chunkIDs)-1))
+
+	args := make([]interface{}, len(chunkIDs))
+	for i, id := range chunkIDs {
+		args[i] = id
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[int64][]ChunkImage)
+	for rows.Next() {
+		var img ChunkImage
+		var caption sql.NullString
+		if err := rows.Scan(&img.ID, &img.ChunkID, &img.DocumentID, &caption,
+			&img.MIMEType, &img.Width, &img.Height, &img.PageNumber, &img.Data); err != nil {
+			return nil, err
+		}
+		img.Caption = caption.String
+		result[img.ChunkID] = append(result[img.ChunkID], img)
+	}
+	return result, rows.Err()
+}
+
 // --- Embedding operations ---
 
 // InsertEmbedding stores a vector embedding for a chunk.
@@ -455,8 +551,9 @@ func (s *Store) InsertEmbedding(ctx context.Context, chunkID int64, embedding []
 func (s *Store) VectorSearch(ctx context.Context, queryEmbedding []float32, k int) ([]RetrievalResult, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT v.chunk_id, v.distance,
-			c.content, c.heading, c.chunk_type, c.page_number, c.document_id,
-			d.filename, d.path
+			c.content, c.heading, c.chunk_type, c.page_number, c.position_in_doc,
+			c.metadata, c.document_id,
+			d.filename, d.path, d.metadata
 		FROM vec_chunks v
 		JOIN chunks c ON c.id = v.chunk_id
 		JOIN documents d ON d.id = c.document_id
@@ -472,13 +569,17 @@ func (s *Store) VectorSearch(ctx context.Context, queryEmbedding []float32, k in
 	for rows.Next() {
 		var r RetrievalResult
 		var distance float64
+		var chunkMeta, docMeta sql.NullString
 		if err := rows.Scan(&r.ChunkID, &distance,
-			&r.Content, &r.Heading, &r.ChunkType, &r.PageNumber, &r.DocumentID,
-			&r.Filename, &r.Path); err != nil {
+			&r.Content, &r.Heading, &r.ChunkType, &r.PageNumber, &r.PositionInDoc,
+			&chunkMeta, &r.DocumentID,
+			&r.Filename, &r.Path, &docMeta); err != nil {
 			return nil, err
 		}
 		// Convert distance to similarity score (1 - distance for cosine)
 		r.Score = 1.0 - distance
+		r.ChunkMeta = chunkMeta.String
+		r.DocMeta = docMeta.String
 		results = append(results, r)
 	}
 	return results, rows.Err()
@@ -488,8 +589,9 @@ func (s *Store) VectorSearch(ctx context.Context, queryEmbedding []float32, k in
 func (s *Store) FTSSearch(ctx context.Context, query string, limit int) ([]RetrievalResult, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT f.rowid, f.rank,
-			c.content, c.heading, c.chunk_type, c.page_number, c.document_id,
-			d.filename, d.path
+			c.content, c.heading, c.chunk_type, c.page_number, c.position_in_doc,
+			c.metadata, c.document_id,
+			d.filename, d.path, d.metadata
 		FROM chunks_fts f
 		JOIN chunks c ON c.id = f.rowid
 		JOIN documents d ON d.id = c.document_id
@@ -506,13 +608,17 @@ func (s *Store) FTSSearch(ctx context.Context, query string, limit int) ([]Retri
 	for rows.Next() {
 		var r RetrievalResult
 		var rank float64
+		var chunkMeta, docMeta sql.NullString
 		if err := rows.Scan(&r.ChunkID, &rank,
-			&r.Content, &r.Heading, &r.ChunkType, &r.PageNumber, &r.DocumentID,
-			&r.Filename, &r.Path); err != nil {
+			&r.Content, &r.Heading, &r.ChunkType, &r.PageNumber, &r.PositionInDoc,
+			&chunkMeta, &r.DocumentID,
+			&r.Filename, &r.Path, &docMeta); err != nil {
 			return nil, err
 		}
 		// FTS5 rank is negative (lower = better), convert to positive score
 		r.Score = -rank
+		r.ChunkMeta = chunkMeta.String
+		r.DocMeta = docMeta.String
 		results = append(results, r)
 	}
 	return results, rows.Err()
@@ -702,8 +808,9 @@ func (s *Store) GraphSearch(ctx context.Context, entityIDs []int64, limit int) (
 
 	query := `
 		SELECT DISTINCT ec.chunk_id, COALESCE(MAX(r.weight), 0.5),
-			c.content, c.heading, c.chunk_type, c.page_number, c.document_id,
-			d.filename, d.path
+			c.content, c.heading, c.chunk_type, c.page_number, c.position_in_doc,
+			c.metadata, c.document_id,
+			d.filename, d.path, d.metadata
 		FROM entity_chunks ec
 		LEFT JOIN relationships r ON r.source_entity_id = ec.entity_id OR r.target_entity_id = ec.entity_id
 		JOIN chunks c ON c.id = ec.chunk_id
@@ -728,11 +835,15 @@ func (s *Store) GraphSearch(ctx context.Context, entityIDs []int64, limit int) (
 	var results []RetrievalResult
 	for rows.Next() {
 		var r RetrievalResult
+		var chunkMeta, docMeta sql.NullString
 		if err := rows.Scan(&r.ChunkID, &r.Score,
-			&r.Content, &r.Heading, &r.ChunkType, &r.PageNumber, &r.DocumentID,
-			&r.Filename, &r.Path); err != nil {
+			&r.Content, &r.Heading, &r.ChunkType, &r.PageNumber, &r.PositionInDoc,
+			&chunkMeta, &r.DocumentID,
+			&r.Filename, &r.Path, &docMeta); err != nil {
 			return nil, err
 		}
+		r.ChunkMeta = chunkMeta.String
+		r.DocMeta = docMeta.String
 		results = append(results, r)
 	}
 	return results, rows.Err()

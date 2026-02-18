@@ -44,6 +44,9 @@ type Config struct {
 	MaxRounds           int     `json:"max_rounds" yaml:"max_rounds"`
 	ConfidenceThreshold float64 `json:"confidence_threshold" yaml:"confidence_threshold"`
 
+	// Image captioning
+	CaptionImages bool `json:"caption_images" yaml:"caption_images"` // Opt-in: caption extracted images via vision LLM
+
 	// External parsing
 	LlamaParse *LlamaParseConfig `json:"llamaparse,omitempty" yaml:"llamaparse,omitempty"`
 
@@ -53,7 +56,7 @@ type Config struct {
 
 // LLMConfig configures a single LLM provider endpoint.
 type LLMConfig struct {
-	Provider string `json:"provider" yaml:"provider"` // ollama, lmstudio, openrouter, xai, custom
+	Provider string `json:"provider" yaml:"provider"` // ollama, lmstudio, openrouter, xai, gemini, custom
 	Model    string `json:"model" yaml:"model"`
 	BaseURL  string `json:"base_url" yaml:"base_url"`
 	APIKey   string `json:"api_key" yaml:"api_key"`

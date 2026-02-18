@@ -3,6 +3,7 @@ package goreason
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -68,13 +69,31 @@ type Answer struct {
 
 // Source represents a retrieved source chunk backing an answer.
 type Source struct {
-	ChunkID    int64   `json:"chunk_id"`
-	DocumentID int64   `json:"document_id"`
-	Filename   string  `json:"filename"`
-	Content    string  `json:"content"`
-	Heading    string  `json:"heading"`
-	PageNumber int     `json:"page_number"`
-	Score      float64 `json:"score"`
+	ChunkID          int64             `json:"chunk_id"`
+	DocumentID       int64             `json:"document_id"`
+	Filename         string            `json:"filename"`
+	Path             string            `json:"path,omitempty"`
+	Content          string            `json:"content"`
+	Heading          string            `json:"heading"`
+	ChunkType        string            `json:"chunk_type,omitempty"`
+	PageNumber       int               `json:"page_number"`
+	PositionInDoc    int               `json:"position_in_doc,omitempty"`
+	Score            float64           `json:"score"`
+	ChunkMetadata    map[string]string `json:"chunk_metadata,omitempty"`
+	DocumentMetadata map[string]string `json:"document_metadata,omitempty"`
+	Snippet          string            `json:"snippet,omitempty"`
+	Images           []SourceImage     `json:"images,omitempty"`
+}
+
+// SourceImage represents an image associated with a source chunk.
+type SourceImage struct {
+	ID         int64  `json:"id"`
+	Caption    string `json:"caption,omitempty"`
+	MIMEType   string `json:"mime_type"`
+	Width      int    `json:"width"`
+	Height     int    `json:"height"`
+	PageNumber int    `json:"page_number"`
+	Data       []byte `json:"data,omitempty"`
 }
 
 // Step represents a single reasoning round in the multi-round pipeline.
@@ -142,12 +161,13 @@ func WithMetadata(metadata map[string]string) IngestOption {
 type QueryOption func(*queryOptions)
 
 type queryOptions struct {
-	maxResults  int
-	maxRounds   int
-	weightVec   float64
-	weightFTS   float64
-	weightGraph float64
-	jsonOutput  bool
+	maxResults    int
+	maxRounds     int
+	weightVec     float64
+	weightFTS     float64
+	weightGraph   float64
+	jsonOutput    bool
+	includeImages bool
 }
 
 // WithMaxResults sets the maximum number of chunks to retrieve.
@@ -165,6 +185,13 @@ func WithMaxRounds(n int) QueryOption {
 // The Found field on Answer is set accordingly, and Text holds the response.
 func WithJSONOutput() QueryOption {
 	return func(o *queryOptions) { o.jsonOutput = true }
+}
+
+// WithIncludeImages enables returning raw image bytes in source images.
+// Without this option, image metadata (caption, dimensions, etc.) is still
+// returned but the Data field is empty.
+func WithIncludeImages() QueryOption {
+	return func(o *queryOptions) { o.includeImages = true }
 }
 
 // WithWeights overrides the retrieval weights for this query.
@@ -369,9 +396,21 @@ func (e *engine) Ingest(ctx context.Context, path string, opts ...IngestOption) 
 	// Update parse method
 	e.store.UpdateDocumentParseMethod(ctx, docID, parseMethod)
 
+	// Caption images (opt-in) — inject [Image: caption] or [image] into section content
+	var collectedImages []captionedImage
+	if len(parsed.Images) > 0 {
+		parsed.Sections, collectedImages = e.captionImages(ctx, parsed.Sections, parsed.Images)
+	}
+
 	// Chunk
 	chunkStart := time.Now()
-	chunks := e.chunkr.Chunk(parsed.Sections)
+	var chunks []store.Chunk
+	var sectionMap []int // maps chunk index -> originating section index
+	if len(collectedImages) > 0 {
+		chunks, sectionMap = e.chunkr.ChunkWithSectionMap(parsed.Sections)
+	} else {
+		chunks = e.chunkr.Chunk(parsed.Sections)
+	}
 	slog.Info("ingest: chunking complete",
 		"file", filename, "chunks", len(chunks),
 		"max_tokens", e.cfg.MaxChunkTokens, "overlap", e.cfg.ChunkOverlap,
@@ -391,6 +430,42 @@ func (e *engine) Ingest(ctx context.Context, path string, opts ...IngestOption) 
 	if err != nil {
 		e.store.UpdateDocumentStatus(ctx, docID, "error")
 		return 0, fmt.Errorf("inserting chunks: %w", err)
+	}
+
+	// Store extracted images linked to their chunks
+	if len(collectedImages) > 0 && sectionMap != nil {
+		// Build section index -> first chunk ID mapping
+		sectionToChunkID := make(map[int]int64)
+		for i, secIdx := range sectionMap {
+			if _, exists := sectionToChunkID[secIdx]; !exists {
+				sectionToChunkID[secIdx] = chunkIDs[i]
+			}
+		}
+
+		var storeImages []store.ChunkImage
+		for _, ci := range collectedImages {
+			chunkID, ok := sectionToChunkID[ci.sectionIndex]
+			if !ok {
+				continue
+			}
+			storeImages = append(storeImages, store.ChunkImage{
+				ChunkID:    chunkID,
+				DocumentID: docID,
+				Caption:    ci.caption,
+				MIMEType:   ci.image.MIMEType,
+				Width:      ci.image.Width,
+				Height:     ci.image.Height,
+				PageNumber: ci.image.PageNumber,
+				Data:       ci.image.Data,
+			})
+		}
+		if len(storeImages) > 0 {
+			if err := e.store.InsertChunkImages(ctx, storeImages); err != nil {
+				slog.Warn("ingest: storing chunk images failed (non-fatal)", "error", err)
+			} else {
+				slog.Info("ingest: stored chunk images", "count", len(storeImages))
+			}
+		}
 	}
 
 	// Generate embeddings concurrently
@@ -550,16 +625,63 @@ func (e *engine) Query(ctx context.Context, question string, opts ...QueryOption
 		TotalTokens:      rAnswer.TotalTokens,
 	}
 	for _, s := range rAnswer.Sources {
-		answer.Sources = append(answer.Sources, Source{
-			ChunkID:    s.ChunkID,
-			DocumentID: s.DocumentID,
-			Filename:   s.Filename,
-			Content:    s.Content,
-			Heading:    s.Heading,
-			PageNumber: s.PageNumber,
-			Score:      s.Score,
-		})
+		src := Source{
+			ChunkID:       s.ChunkID,
+			DocumentID:    s.DocumentID,
+			Filename:      s.Filename,
+			Path:          s.Path,
+			Content:       s.Content,
+			Heading:       s.Heading,
+			ChunkType:     s.ChunkType,
+			PageNumber:    s.PageNumber,
+			PositionInDoc: s.PositionInDoc,
+			Score:         s.Score,
+		}
+		if s.ChunkMeta != "" && s.ChunkMeta != "{}" {
+			_ = json.Unmarshal([]byte(s.ChunkMeta), &src.ChunkMetadata)
+		}
+		if s.DocMeta != "" && s.DocMeta != "{}" {
+			_ = json.Unmarshal([]byte(s.DocMeta), &src.DocumentMetadata)
+		}
+		answer.Sources = append(answer.Sources, src)
 	}
+
+	// Generate snippets: extract the most relevant sentences from each source.
+	answerWords := significantWords(answer.Text)
+	for i := range answer.Sources {
+		if snippet := extractSnippet(answer.Sources[i].Content, answerWords); snippet != "" {
+			answer.Sources[i].Snippet = snippet
+		}
+	}
+
+	// Load images for retrieved chunks.
+	if len(answer.Sources) > 0 {
+		chunkIDs := make([]int64, len(answer.Sources))
+		for i, s := range answer.Sources {
+			chunkIDs[i] = s.ChunkID
+		}
+		imageMap, err := e.store.GetImagesByChunkIDs(ctx, chunkIDs, options.includeImages)
+		if err != nil {
+			slog.Warn("query: loading chunk images failed (non-fatal)", "error", err)
+		} else if len(imageMap) > 0 {
+			for i := range answer.Sources {
+				if imgs, ok := imageMap[answer.Sources[i].ChunkID]; ok {
+					for _, img := range imgs {
+						answer.Sources[i].Images = append(answer.Sources[i].Images, SourceImage{
+							ID:         img.ID,
+							Caption:    img.Caption,
+							MIMEType:   img.MIMEType,
+							Width:      img.Width,
+							Height:     img.Height,
+							PageNumber: img.PageNumber,
+							Data:       img.Data,
+						})
+					}
+				}
+			}
+		}
+	}
+
 	for _, s := range rAnswer.Reasoning {
 		answer.Reasoning = append(answer.Reasoning, Step{
 			Round:      s.Round,
@@ -777,6 +899,145 @@ func (e *engine) embedChunks(ctx context.Context, chunks []store.Chunk, chunkIDs
 		slog.Warn("some embeddings failed", "failed", failed, "total", len(chunks))
 	}
 	return nil
+}
+
+// captionedImage holds a parsed image with its caption and originating section.
+type captionedImage struct {
+	image        parser.ExtractedImage
+	caption      string
+	sectionIndex int
+}
+
+// captionImages processes extracted images: sends the largest image per page/section
+// to a vision LLM for captioning and injects the result into section content.
+// Non-captioned images get a plain [image] marker.
+// Returns modified sections and a slice of all images with captions for storage.
+func (e *engine) captionImages(ctx context.Context, sections []parser.Section, images []parser.ExtractedImage) ([]parser.Section, []captionedImage) {
+	if len(images) == 0 {
+		return sections, nil
+	}
+
+	// Check if captioning is enabled and vision LLM supports it
+	var visionLLM llm.VisionProvider
+	if e.cfg.CaptionImages && e.visionLLM != nil {
+		vp, ok := e.visionLLM.(llm.VisionProvider)
+		if ok {
+			visionLLM = vp
+		} else {
+			slog.Warn("ingest: caption_images enabled but vision LLM does not support ChatWithImages, falling back to [image] markers")
+		}
+	}
+
+	// Group images by page number (PDF/PPTX) or section index (DOCX).
+	// Use page number when available (>0), otherwise section index.
+	type groupKey struct {
+		page         int
+		sectionIndex int
+	}
+	groups := make(map[groupKey][]int) // key -> indices into images slice
+	for i, img := range images {
+		var key groupKey
+		if img.PageNumber > 0 {
+			key = groupKey{page: img.PageNumber}
+		} else {
+			key = groupKey{sectionIndex: img.SectionIndex}
+		}
+		groups[key] = append(groups[key], i)
+	}
+
+	// For each group: pick the largest image (by pixel area), caption it, mark others
+	captionStart := time.Now()
+	var pagesCaptioned int
+	var collected []captionedImage
+
+	for key, idxs := range groups {
+		// Find the largest image in this group
+		largestIdx := idxs[0]
+		largestArea := images[idxs[0]].Width * images[idxs[0]].Height
+		for _, idx := range idxs[1:] {
+			area := images[idx].Width * images[idx].Height
+			if area > largestArea {
+				largestArea = area
+				largestIdx = idx
+			}
+		}
+
+		// Determine which section to inject into
+		sectionIdx := images[largestIdx].SectionIndex
+		if sectionIdx >= len(sections) {
+			sectionIdx = len(sections) - 1
+		}
+		if sectionIdx < 0 {
+			continue
+		}
+
+		// Count non-captioned images for this group
+		otherCount := len(idxs) - 1
+
+		// Caption the largest image
+		var caption string
+		if visionLLM != nil {
+			img := images[largestIdx]
+			b64 := base64.StdEncoding.EncodeToString(img.Data)
+			dataURI := fmt.Sprintf("data:%s;base64,%s", img.MIMEType, b64)
+
+			resp, err := visionLLM.ChatWithImages(ctx, llm.VisionChatRequest{
+				Messages: []llm.VisionMessage{{
+					Role: "user",
+					Content: []llm.ContentPart{
+						{Type: "text", Text: "Describe this image concisely in 1-2 sentences. Focus on what information it conveys."},
+						{Type: "image_url", ImageURL: &llm.ImageURL{URL: dataURI}},
+					},
+				}},
+				MaxTokens: 256,
+			})
+			if err != nil {
+				slog.Warn("ingest: image captioning failed, using [image]",
+					"page", key.page, "error", err)
+				caption = ""
+			} else {
+				caption = strings.TrimSpace(resp.Content)
+				pagesCaptioned++
+			}
+		}
+
+		// Build the marker text
+		var marker strings.Builder
+		if caption != "" {
+			marker.WriteString("\n[Image: ")
+			marker.WriteString(caption)
+			marker.WriteString("]")
+		} else {
+			marker.WriteString("\n[image]")
+		}
+		for i := 0; i < otherCount; i++ {
+			marker.WriteString("\n[image]")
+		}
+
+		// Inject into section content
+		sections[sectionIdx].Content += marker.String()
+
+		// Collect all images in this group for storage
+		for _, idx := range idxs {
+			imgCaption := ""
+			if idx == largestIdx {
+				imgCaption = caption
+			}
+			collected = append(collected, captionedImage{
+				image:        images[idx],
+				caption:      imgCaption,
+				sectionIndex: sectionIdx,
+			})
+		}
+	}
+
+	slog.Info("ingest: image processing complete",
+		"total_images", len(images),
+		"pages_captioned", pagesCaptioned,
+		"captioning_enabled", visionLLM != nil,
+		"elapsed", time.Since(captionStart).Round(time.Millisecond))
+
+	return sections, collected
 }
 
 // Regex patterns for extracting technical identifiers from answer text.

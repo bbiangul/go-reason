@@ -75,6 +75,10 @@ func (p *ollamaProvider) Embed(ctx context.Context, texts []string) ([][]float32
 	return result, nil
 }
 
+func (p *ollamaProvider) ChatWithImages(ctx context.Context, req VisionChatRequest) (*ChatResponse, error) {
+	return p.base.chatWithImages(ctx, req)
+}
+
 type ollamaEmbedRequest struct {
 	Model string   `json:"model"`
 	Input []string `json:"input"`

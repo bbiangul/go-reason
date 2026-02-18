@@ -46,3 +46,9 @@ Thumbs.db
 # Evaluation artifacts
 eval-report*.json
 evals/runs/
+
+# Internal tracking (never commit)
+overfit.md
+
+# Benchmark data (large corpus files)
+data/

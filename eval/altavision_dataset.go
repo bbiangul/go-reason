@@ -895,6 +895,66 @@ func ALTAVisionSuperHardDataset() Dataset {
 	}
 }
 
+// ALTAVisionGraphTestDataset returns 7 targeted test cases for evaluating
+// graph-mode retrieval on the ALTAVision manual. These cover electrical specs,
+// grounding, environment, anchoring, tracker card, beacon lights, and vortex cooling.
+func ALTAVisionGraphTestDataset() Dataset {
+	return Dataset{
+		Name:       "ALTAVision Graph Test - Targeted Retrieval",
+		Difficulty: DifficultyGraphTest,
+		Tests: []TestCase{
+			{
+				Question:      "What are the electrical power requirements?",
+				ExpectedFacts: []string{"120|240", "VAC", "THD"},
+				Category:      "single-fact",
+				Explanation:   "Specified voltage is 120/240 VAC, current 5-14 A depending on A/C, and power quality THD < 5%.",
+			},
+			{
+				Question:      "How should the machine be grounded?",
+				ExpectedFacts: []string{"1 VAC|Neutral|neutral", "14 AWG|14AWG"},
+				Category:      "single-fact",
+				Explanation:   "Proper grounding: < 1 VAC Neutral-Ground, wire gauge 14 AWG.",
+			},
+			{
+				Question:      "What are the environmental operating conditions?",
+				ExpectedFacts: []string{"5°|5º|5 °|5 º", "10°|10º|10 °|10 º|40°|40º", "30%|95%"},
+				Category:      "single-fact",
+				Explanation:   "Temperature 5ºC–10ºC (or up to 40ºC) and humidity limits 30%-95%.",
+			},
+			{
+				Question:      "How do I anchor the machine to the floor?",
+				ExpectedFacts: []string{"anchor|bolt|ancla|perno", "4 leg|four leg|4 pata|cuatro pata", "10mm|10 mm"},
+				Category:      "single-fact",
+				Explanation:   "Altabev provides anchor bolts for all 4 legs and conveyors, with a 10mm drill bit for installation.",
+			},
+			{
+				Question:      "What is the function of the Tracker Card (E1375.1)?",
+				ExpectedFacts: []string{"E1375", "camera|cámara|strobe", "reject|rechazo"},
+				Category:      "multi-fact",
+				Explanation:   "Tracks container position, triggers cameras/strobes, and manages rejection signals.",
+			},
+			{
+				Question:      "What do the beacon light colors mean?",
+				ExpectedFacts: []string{"Green|green|Verde|verde", "Blue|blue|Azul|azul", "Red|red|Rojo|rojo"},
+				Category:      "multi-fact",
+				Explanation:   "Green: Standard Operation, Blue: Reject Detection, Red: Fault or Disabled Rejector.",
+			},
+			{
+				Question:      "How does the Vortex cooling system work?",
+				ExpectedFacts: []string{"compressed air|aire comprimido", "vortex|Vortex", "positive pressure|presión positiva|hot|cold"},
+				Category:      "multi-hop",
+				Explanation:   "Compressed air enters vortex tube, splits into hot/cold streams. Cold air cools cabinet, hot air exhausts. Cabinet maintained at slight positive pressure to prevent outside air entry.",
+			},
+			{
+				Question:      "How do I interpret the main screen counters?",
+				ExpectedFacts: []string{"Global|global|Globales|globales", "Specific|specific|Específicos|específicos", "multiple criteria|múltiples criterios|counted once|una sola vez|una vez"},
+				Category:      "multi-fact",
+				Explanation:   "Two types: Global Counters (total inspected, total rejected, overall rejection rate) and Specific Counters (per-criterion breakdown). When a unit fails multiple criteria, each specific counter increments but the global rejected count only counts the unit once.",
+			},
+		},
+	}
+}
+
 // ALTAVisionAllDatasets returns all ALTAVision datasets keyed by difficulty.
 func ALTAVisionAllDatasets() map[string]Dataset {
 	return map[string]Dataset{
@@ -902,5 +962,6 @@ func ALTAVisionAllDatasets() map[string]Dataset {
 		DifficultyMedium:    ALTAVisionMediumDataset(),
 		DifficultyHard:      ALTAVisionHardDataset(),
 		DifficultySuperHard: ALTAVisionSuperHardDataset(),
+		DifficultyGraphTest: ALTAVisionGraphTestDataset(),
 	}
 }

@@ -51,7 +51,7 @@ func TestRegistryBuiltInParsers(t *testing.T) {
 func TestRegistryUnknown(t *testing.T) {
 	reg := NewRegistry()
 
-	unknownFormats := []string{"txt", "csv", "json", "html", "rtf", "odt", ""}
+	unknownFormats := []string{"csv", "json", "html", "rtf", "odt", ""}
 	for _, fmt := range unknownFormats {
 		t.Run("format_"+fmt, func(t *testing.T) {
 			p, err := reg.Get(fmt)

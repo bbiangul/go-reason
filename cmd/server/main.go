@@ -75,6 +75,8 @@ func main() {
 			cfg.Chat.APIKey = os.Getenv("OPENAI_API_KEY")
 		case "groq":
 			cfg.Chat.APIKey = os.Getenv("GROQ_API_KEY")
+		case "gemini":
+			cfg.Chat.APIKey = os.Getenv("GEMINI_API_KEY")
 		}
 	}
 	if cfg.Embedding.APIKey == "" {
@@ -83,6 +85,8 @@ func main() {
 			cfg.Embedding.APIKey = os.Getenv("OPENAI_API_KEY")
 		case "groq":
 			cfg.Embedding.APIKey = os.Getenv("GROQ_API_KEY")
+		case "gemini":
+			cfg.Embedding.APIKey = os.Getenv("GEMINI_API_KEY")
 		}
 	}
 

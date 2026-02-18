@@ -14,17 +14,23 @@ import (
 
 // openAICompatClient is the shared base for all OpenAI-compatible providers.
 type openAICompatClient struct {
-	cfg    Config
-	client *http.Client
+	cfg        Config
+	client     *http.Client
+	pathPrefix string // API path prefix, defaults to "/v1"
 }
 
 func newOpenAICompatClient(cfg Config) openAICompatClient {
+	return newOpenAICompatClientPrefix(cfg, "/v1")
+}
+
+func newOpenAICompatClientPrefix(cfg Config, prefix string) openAICompatClient {
 	// Timeout for individual HTTP requests. Kept generous for local providers
 	// (Ollama, LM Studio) which may load models on first request, but
 	// reasonable enough to avoid multi-minute hangs on stalled connections.
 	timeout := 120 * time.Second
 	return openAICompatClient{
-		cfg: cfg,
+		cfg:        cfg,
+		pathPrefix: prefix,
 		client: &http.Client{
 			Timeout: timeout,
 		},
@@ -46,6 +52,10 @@ func (p *openAICompatProvider) Chat(ctx context.Context, req ChatRequest) (*Chat
 
 func (p *openAICompatProvider) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	return p.base.embed(ctx, texts)
+}
+
+func (p *openAICompatProvider) ChatWithImages(ctx context.Context, req VisionChatRequest) (*ChatResponse, error) {
+	return p.base.chatWithImages(ctx, req)
 }
 
 // --- shared implementation ---
@@ -110,7 +120,7 @@ func (c *openAICompatClient) chat(ctx context.Context, req ChatRequest) (*ChatRe
 		body.ResponseFormat = &responseFormat{Type: "json_object"}
 	}
 
-	respBody, err := c.doPost(ctx, "/v1/chat/completions", body)
+	respBody, err := c.doPost(ctx, c.pathPrefix+"/chat/completions", body)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +150,7 @@ func (c *openAICompatClient) embed(ctx context.Context, texts []string) ([][]flo
 		Input: texts,
 	}
 
-	respBody, err := c.doPost(ctx, "/v1/embeddings", body)
+	respBody, err := c.doPost(ctx, c.pathPrefix+"/embeddings", body)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +188,7 @@ func (c *openAICompatClient) chatWithImages(ctx context.Context, req VisionChatR
 		MaxTokens:   req.MaxTokens,
 	}
 
-	respBody, err := c.doPost(ctx, "/v1/chat/completions", body)
+	respBody, err := c.doPost(ctx, c.pathPrefix+"/chat/completions", body)
 	if err != nil {
 		return nil, err
 	}
@@ -203,8 +213,9 @@ func (c *openAICompatClient) chatWithImages(ctx context.Context, req VisionChatR
 }
 
 const (
-	maxRetries     = 3
-	baseRetryDelay = 1 * time.Second
+	maxRetries         = 6
+	baseRetryDelay     = 2 * time.Second
+	minRateLimitDelay  = 5 * time.Second // minimum delay for 429 errors
 )
 
 // retryableStatusCode returns true for HTTP status codes that warrant a retry.
@@ -277,16 +288,27 @@ func (c *openAICompatClient) doPost(ctx context.Context, path string, body inter
 			return nil, lastErr
 		}
 
-		// Respect Retry-After header on 429.
+		// Handle 429 rate limiting with longer delays.
 		if resp.StatusCode == http.StatusTooManyRequests {
+			rateLimitDelay := minRateLimitDelay * time.Duration(1<<attempt) // 5s, 10s, 20s, 40s...
+			// Respect Retry-After header if provided.
 			if ra := resp.Header.Get("Retry-After"); ra != "" {
 				if seconds, err := strconv.Atoi(ra); err == nil && seconds > 0 {
-					select {
-					case <-time.After(time.Duration(seconds) * time.Second):
-					case <-ctx.Done():
-						return nil, ctx.Err()
+					headerDelay := time.Duration(seconds) * time.Second
+					if headerDelay > rateLimitDelay {
+						rateLimitDelay = headerDelay
 					}
 				}
+			}
+			slog.Warn("llm: rate limited, waiting before retry",
+				"url", url,
+				"attempt", attempt+1,
+				"delay", rateLimitDelay,
+			)
+			select {
+			case <-time.After(rateLimitDelay):
+			case <-ctx.Done():
+				return nil, ctx.Err()
 			}
 		}
 	}

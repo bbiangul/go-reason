@@ -2,10 +2,21 @@ package parser
 
 import "context"
 
+// ExtractedImage represents an image extracted from a document during parsing.
+type ExtractedImage struct {
+	Data         []byte
+	MIMEType     string // "image/jpeg" or "image/png"
+	PageNumber   int    // page/slide number (0 for DOCX)
+	SectionIndex int    // index into ParseResult.Sections this image belongs to
+	Width        int
+	Height       int
+}
+
 // ParseResult is what a parser produces from a document file.
 type ParseResult struct {
-	Sections []Section // Ordered sections extracted from the document
-	Method   string    // "native", "llamaparse", "vision"
+	Sections []Section         // Ordered sections extracted from the document
+	Images   []ExtractedImage  // Images extracted from the document
+	Method   string            // "native", "llamaparse", "vision"
 	Metadata map[string]string
 }
 

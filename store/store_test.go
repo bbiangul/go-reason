@@ -777,6 +777,322 @@ func TestDeleteDocumentData(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// New metadata fields in search results
+// ---------------------------------------------------------------------------
+
+func TestVectorSearchReturnsMetadataFields(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	doc := Document{
+		Path: "/meta/test.pdf", Filename: "test.pdf", Format: "pdf",
+		ContentHash: "h1", ParseMethod: "native", Status: "ready",
+		Metadata: `{"author":"Jane"}`,
+	}
+	docID, err := s.UpsertDocument(ctx, doc)
+	if err != nil {
+		t.Fatalf("upsert doc: %v", err)
+	}
+
+	chunks := []Chunk{
+		{
+			DocumentID: docID, Content: "important clause", ChunkType: "table",
+			Heading: "Section 3.2", PageNumber: 5, PositionInDoc: 7, TokenCount: 2,
+			Metadata: `{"source":"appendix"}`,
+		},
+	}
+	ids, err := s.InsertChunks(ctx, chunks)
+	if err != nil {
+		t.Fatalf("insert chunks: %v", err)
+	}
+
+	if err := s.InsertEmbedding(ctx, ids[0], []float32{1, 0, 0, 0}); err != nil {
+		t.Fatalf("embedding: %v", err)
+	}
+
+	results, err := s.VectorSearch(ctx, []float32{1, 0, 0, 0}, 1)
+	if err != nil {
+		t.Fatalf("vector search: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+
+	r := results[0]
+	if r.DocumentID != docID {
+		t.Errorf("DocumentID: got %d, want %d", r.DocumentID, docID)
+	}
+	if r.ChunkType != "table" {
+		t.Errorf("ChunkType: got %q, want %q", r.ChunkType, "table")
+	}
+	if r.PositionInDoc != 7 {
+		t.Errorf("PositionInDoc: got %d, want 7", r.PositionInDoc)
+	}
+	if r.PageNumber != 5 {
+		t.Errorf("PageNumber: got %d, want 5", r.PageNumber)
+	}
+	if r.Path != "/meta/test.pdf" {
+		t.Errorf("Path: got %q, want %q", r.Path, "/meta/test.pdf")
+	}
+	if r.ChunkMeta != `{"source":"appendix"}` {
+		t.Errorf("ChunkMeta: got %q", r.ChunkMeta)
+	}
+	if r.DocMeta != `{"author":"Jane"}` {
+		t.Errorf("DocMeta: got %q", r.DocMeta)
+	}
+}
+
+func TestFTSSearchReturnsMetadataFields(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	doc := Document{
+		Path: "/fts-meta/contract.pdf", Filename: "contract.pdf", Format: "pdf",
+		ContentHash: "h2", ParseMethod: "native", Status: "ready",
+		Metadata: `{"type":"legal"}`,
+	}
+	docID, err := s.UpsertDocument(ctx, doc)
+	if err != nil {
+		t.Fatalf("upsert doc: %v", err)
+	}
+
+	chunks := []Chunk{
+		{
+			DocumentID: docID, Content: "the indemnification clause states liability",
+			ChunkType: "definition", Heading: "Clause 4.1", PageNumber: 3,
+			PositionInDoc: 2, TokenCount: 5, Metadata: `{"clause":"4.1"}`,
+		},
+	}
+	if _, err := s.InsertChunks(ctx, chunks); err != nil {
+		t.Fatalf("insert chunks: %v", err)
+	}
+
+	results, err := s.FTSSearch(ctx, "indemnification liability", 1)
+	if err != nil {
+		t.Fatalf("fts search: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+
+	r := results[0]
+	if r.DocumentID != docID {
+		t.Errorf("DocumentID: got %d, want %d", r.DocumentID, docID)
+	}
+	if r.ChunkType != "definition" {
+		t.Errorf("ChunkType: got %q, want %q", r.ChunkType, "definition")
+	}
+	if r.PositionInDoc != 2 {
+		t.Errorf("PositionInDoc: got %d, want 2", r.PositionInDoc)
+	}
+	if r.ChunkMeta != `{"clause":"4.1"}` {
+		t.Errorf("ChunkMeta: got %q", r.ChunkMeta)
+	}
+	if r.DocMeta != `{"type":"legal"}` {
+		t.Errorf("DocMeta: got %q", r.DocMeta)
+	}
+}
+
+func TestGraphSearchReturnsMetadataFields(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	doc := Document{
+		Path: "/graph-meta/spec.pdf", Filename: "spec.pdf", Format: "pdf",
+		ContentHash: "h3", ParseMethod: "native", Status: "ready",
+		Metadata: `{"version":"2.0"}`,
+	}
+	docID, err := s.UpsertDocument(ctx, doc)
+	if err != nil {
+		t.Fatalf("upsert doc: %v", err)
+	}
+
+	chunks := []Chunk{
+		{
+			DocumentID: docID, Content: "motor rated at 5kW",
+			ChunkType: "requirement", Heading: "Section 7", PageNumber: 12,
+			PositionInDoc: 4, TokenCount: 4, Metadata: `{"req_id":"R-101"}`,
+		},
+	}
+	chunkIDs, err := s.InsertChunks(ctx, chunks)
+	if err != nil {
+		t.Fatalf("insert chunks: %v", err)
+	}
+
+	entityID, _ := s.UpsertEntity(ctx, Entity{Name: "Motor", EntityType: "component", Description: "5kW motor"})
+	_ = s.LinkEntityChunk(ctx, entityID, chunkIDs[0])
+
+	results, err := s.GraphSearch(ctx, []int64{entityID}, 1)
+	if err != nil {
+		t.Fatalf("graph search: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+
+	r := results[0]
+	if r.DocumentID != docID {
+		t.Errorf("DocumentID: got %d, want %d", r.DocumentID, docID)
+	}
+	if r.ChunkType != "requirement" {
+		t.Errorf("ChunkType: got %q, want %q", r.ChunkType, "requirement")
+	}
+	if r.PositionInDoc != 4 {
+		t.Errorf("PositionInDoc: got %d, want 4", r.PositionInDoc)
+	}
+	if r.ChunkMeta != `{"req_id":"R-101"}` {
+		t.Errorf("ChunkMeta: got %q", r.ChunkMeta)
+	}
+	if r.DocMeta != `{"version":"2.0"}` {
+		t.Errorf("DocMeta: got %q", r.DocMeta)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Chunk image CRUD
+// ---------------------------------------------------------------------------
+
+func TestInsertAndGetChunkImages(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	docID, _ := s.UpsertDocument(ctx, sampleDoc("/images.pdf"))
+	chunkIDs, _ := s.InsertChunks(ctx, []Chunk{
+		{DocumentID: docID, Content: "page with diagram", ChunkType: "paragraph", PositionInDoc: 0, TokenCount: 3},
+		{DocumentID: docID, Content: "page with photo", ChunkType: "paragraph", PositionInDoc: 1, TokenCount: 3},
+	})
+
+	images := []ChunkImage{
+		{ChunkID: chunkIDs[0], DocumentID: docID, Caption: "Wiring diagram", MIMEType: "image/png", Width: 800, Height: 600, PageNumber: 1, Data: []byte("fake-png-data")},
+		{ChunkID: chunkIDs[0], DocumentID: docID, Caption: "", MIMEType: "image/jpeg", Width: 100, Height: 50, PageNumber: 1, Data: []byte("small-img")},
+		{ChunkID: chunkIDs[1], DocumentID: docID, Caption: "Photo of motor", MIMEType: "image/jpeg", Width: 640, Height: 480, PageNumber: 2, Data: []byte("motor-photo")},
+	}
+	if err := s.InsertChunkImages(ctx, images); err != nil {
+		t.Fatalf("insert chunk images: %v", err)
+	}
+
+	// Get with data
+	result, err := s.GetImagesByChunkIDs(ctx, []int64{chunkIDs[0], chunkIDs[1]}, true)
+	if err != nil {
+		t.Fatalf("get images with data: %v", err)
+	}
+	if len(result[chunkIDs[0]]) != 2 {
+		t.Fatalf("chunk[0] images: expected 2, got %d", len(result[chunkIDs[0]]))
+	}
+	if len(result[chunkIDs[1]]) != 1 {
+		t.Fatalf("chunk[1] images: expected 1, got %d", len(result[chunkIDs[1]]))
+	}
+
+	img0 := result[chunkIDs[0]][0]
+	if img0.Caption != "Wiring diagram" {
+		t.Errorf("caption: got %q", img0.Caption)
+	}
+	if img0.Width != 800 || img0.Height != 600 {
+		t.Errorf("dimensions: got %dx%d", img0.Width, img0.Height)
+	}
+	if string(img0.Data) != "fake-png-data" {
+		t.Errorf("data: got %q", string(img0.Data))
+	}
+
+	// Get without data
+	resultNoData, err := s.GetImagesByChunkIDs(ctx, []int64{chunkIDs[0]}, false)
+	if err != nil {
+		t.Fatalf("get images without data: %v", err)
+	}
+	for _, img := range resultNoData[chunkIDs[0]] {
+		if img.Data != nil {
+			t.Errorf("expected nil Data when includeData=false, got %d bytes", len(img.Data))
+		}
+		// Metadata should still be present
+		if img.MIMEType == "" {
+			t.Error("expected non-empty MIMEType even without data")
+		}
+	}
+}
+
+func TestInsertChunkImagesEmpty(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Should be a no-op, not an error.
+	if err := s.InsertChunkImages(ctx, nil); err != nil {
+		t.Fatalf("insert empty images: %v", err)
+	}
+}
+
+func TestGetImagesByChunkIDsEmpty(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	result, err := s.GetImagesByChunkIDs(ctx, nil, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != nil {
+		t.Fatalf("expected nil for empty chunk IDs, got %v", result)
+	}
+}
+
+func TestDeleteDocumentDataCascadesImages(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	docID, _ := s.UpsertDocument(ctx, sampleDoc("/cascade-img.pdf"))
+	chunkIDs, _ := s.InsertChunks(ctx, []Chunk{
+		{DocumentID: docID, Content: "data", ChunkType: "p", PositionInDoc: 0, TokenCount: 1},
+	})
+	_ = s.InsertEmbedding(ctx, chunkIDs[0], []float32{1, 0, 0, 0})
+	_ = s.InsertChunkImages(ctx, []ChunkImage{
+		{ChunkID: chunkIDs[0], DocumentID: docID, MIMEType: "image/png", Width: 10, Height: 10, Data: []byte("x")},
+	})
+
+	// Verify image exists
+	imgs, _ := s.GetImagesByChunkIDs(ctx, chunkIDs, false)
+	if len(imgs[chunkIDs[0]]) != 1 {
+		t.Fatal("expected 1 image before delete")
+	}
+
+	// Delete data
+	if err := s.DeleteDocumentData(ctx, docID); err != nil {
+		t.Fatalf("delete data: %v", err)
+	}
+
+	// Images should be gone
+	imgs2, _ := s.GetImagesByChunkIDs(ctx, chunkIDs, false)
+	if len(imgs2) != 0 {
+		t.Fatalf("expected 0 images after cascade, got %d", len(imgs2))
+	}
+}
+
+func TestDeleteDocumentCascadesImages(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	docID, _ := s.UpsertDocument(ctx, sampleDoc("/del-doc-img.pdf"))
+	chunkIDs, _ := s.InsertChunks(ctx, []Chunk{
+		{DocumentID: docID, Content: "data", ChunkType: "p", PositionInDoc: 0, TokenCount: 1},
+	})
+	_ = s.InsertEmbedding(ctx, chunkIDs[0], []float32{1, 0, 0, 0})
+	_ = s.InsertChunkImages(ctx, []ChunkImage{
+		{ChunkID: chunkIDs[0], DocumentID: docID, MIMEType: "image/png", Width: 10, Height: 10, Data: []byte("x")},
+	})
+
+	if err := s.DeleteDocument(ctx, docID); err != nil {
+		t.Fatalf("delete doc: %v", err)
+	}
+
+	// Verify images are gone (chunk IDs no longer valid, but query shouldn't error)
+	var count int
+	err := s.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM chunk_images").Scan(&count)
+	if err != nil {
+		t.Fatalf("count images: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 images after doc delete, got %d", count)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // AllEntities / AllRelationships
 // ---------------------------------------------------------------------------
 

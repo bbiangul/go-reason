@@ -19,8 +19,9 @@ func NewRegistry() *Registry {
 	docx := &DOCXParser{}
 	xlsx := &XLSXParser{}
 	pptx := &PPTXParser{}
+	txt := &TextParser{}
 
-	for _, p := range []Parser{pdf, docx, xlsx, pptx} {
+	for _, p := range []Parser{pdf, docx, xlsx, pptx, txt} {
 		for _, f := range p.SupportedFormats() {
 			r.parsers[f] = p
 		}

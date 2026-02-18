@@ -15,6 +15,7 @@ func TestNewProvider(t *testing.T) {
 		{"lmstudio", "*llm.lmStudioProvider"},
 		{"openrouter", "*llm.openRouterProvider"},
 		{"xai", "*llm.xaiProvider"},
+		{"gemini", "*llm.geminiProvider"},
 		{"custom", "*llm.openAICompatProvider"},
 	}
 
@@ -78,6 +79,7 @@ func TestDefaultBaseURLs(t *testing.T) {
 		{"lmstudio", "http://localhost:1234", "base.cfg.BaseURL"},
 		{"openrouter", "https://openrouter.ai/api", "base.cfg.BaseURL"},
 		{"xai", "https://api.x.ai", "base.cfg.BaseURL"},
+		{"gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "base.cfg.BaseURL"},
 	}
 
 	for _, tt := range tests {
@@ -133,7 +135,7 @@ func TestCustomProviderNoDefaultURL(t *testing.T) {
 func TestExplicitBaseURLPreserved(t *testing.T) {
 	customURL := "http://my-server:9999"
 
-	tests := []string{"ollama", "lmstudio", "openrouter", "xai", "custom"}
+	tests := []string{"ollama", "lmstudio", "openrouter", "xai", "gemini", "custom"}
 	for _, provider := range tests {
 		t.Run(provider, func(t *testing.T) {
 			cfg := Config{
@@ -161,7 +163,7 @@ func TestExplicitBaseURLPreserved(t *testing.T) {
 // TestProviderImplementsInterface confirms that every provider
 // returned by NewProvider satisfies the Provider interface.
 func TestProviderImplementsInterface(t *testing.T) {
-	providers := []string{"ollama", "lmstudio", "openrouter", "xai", "custom"}
+	providers := []string{"ollama", "lmstudio", "openrouter", "xai", "gemini", "custom"}
 
 	for _, name := range providers {
 		t.Run(name, func(t *testing.T) {

@@ -23,3 +23,7 @@ func (p *lmStudioProvider) Chat(ctx context.Context, req ChatRequest) (*ChatResp
 func (p *lmStudioProvider) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	return p.base.embed(ctx, texts)
 }
+
+func (p *lmStudioProvider) ChatWithImages(ctx context.Context, req VisionChatRequest) (*ChatResponse, error) {
+	return p.base.chatWithImages(ctx, req)
+}

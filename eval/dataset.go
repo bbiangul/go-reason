@@ -7,6 +7,7 @@ const (
 	DifficultyHard      = "hard"
 	DifficultyComplex   = "complex"    // Used by legacy ComplexDataset(); not part of ALTAVision eval.
 	DifficultySuperHard = "super-hard"
+	DifficultyGraphTest = "graph-test"
 )
 
 // Dataset is a collection of test cases for evaluation.

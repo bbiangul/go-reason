@@ -37,13 +37,18 @@ type Answer struct {
 
 // Source tracks a chunk used in the answer.
 type Source struct {
-	ChunkID    int64   `json:"chunk_id"`
-	DocumentID int64   `json:"document_id"`
-	Filename   string  `json:"filename"`
-	Content    string  `json:"content"`
-	Heading    string  `json:"heading"`
-	PageNumber int     `json:"page_number"`
-	Score      float64 `json:"score"`
+	ChunkID       int64   `json:"chunk_id"`
+	DocumentID    int64   `json:"document_id"`
+	Filename      string  `json:"filename"`
+	Path          string  `json:"path"`
+	Content       string  `json:"content"`
+	Heading       string  `json:"heading"`
+	ChunkType     string  `json:"chunk_type"`
+	PageNumber    int     `json:"page_number"`
+	PositionInDoc int     `json:"position_in_doc"`
+	Score         float64 `json:"score"`
+	ChunkMeta     string  `json:"chunk_metadata,omitempty"`
+	DocMeta       string  `json:"doc_metadata,omitempty"`
 }
 
 // Step records a single round of the reasoning pipeline.
@@ -91,13 +96,18 @@ func (e *Engine) Reason(ctx context.Context, question string, chunks []store.Ret
 	sources := make([]Source, len(chunks))
 	for i, c := range chunks {
 		sources[i] = Source{
-			ChunkID:    c.ChunkID,
-			DocumentID: c.DocumentID,
-			Filename:   c.Filename,
-			Content:    c.Content,
-			Heading:    c.Heading,
-			PageNumber: c.PageNumber,
-			Score:      c.Score,
+			ChunkID:       c.ChunkID,
+			DocumentID:    c.DocumentID,
+			Filename:      c.Filename,
+			Path:          c.Path,
+			Content:       c.Content,
+			Heading:       c.Heading,
+			ChunkType:     c.ChunkType,
+			PageNumber:    c.PageNumber,
+			PositionInDoc: c.PositionInDoc,
+			Score:         c.Score,
+			ChunkMeta:     c.ChunkMeta,
+			DocMeta:       c.DocMeta,
 		}
 	}
 
@@ -245,12 +255,18 @@ func (e *Engine) Reason(ctx context.Context, question string, chunks []store.Ret
 }
 
 const systemPrompt = `You are a precise document analysis assistant. Answer questions based ONLY on the provided context.
+
 Rules:
-1. Only state facts that are directly supported by the provided sources.
+1. Only state facts that are directly supported by the provided sources. Never use external knowledge.
 2. Cite sources by referencing the document filename and section/page when possible.
-3. If the context doesn't contain enough information to answer, say so explicitly.
+3. If the provided context does NOT contain the answer or enough information to answer:
+   - State clearly: "This information is not found in the provided documents."
+   - Do NOT guess, speculate, or use your general knowledge to fill gaps.
+   - Do NOT say "based on the context" and then provide information not actually in the context.
+   - It is perfectly acceptable and preferred to say the information is not available.
 4. For legal and engineering documents, preserve exact terminology and clause references.
-5. Be concise but thorough.`
+5. Be concise but thorough. When multiple sources agree, synthesize them.
+6. If you are only partially sure about some facts, distinguish clearly between what the documents say and what is uncertain.`
 
 func buildContext(chunks []store.RetrievalResult) string {
 	var b strings.Builder
@@ -261,6 +277,9 @@ func buildContext(chunks []store.RetrievalResult) string {
 		}
 		if c.PageNumber > 0 {
 			fmt.Fprintf(&b, " | Page %d", c.PageNumber)
+		}
+		if c.ChunkType != "" && c.ChunkType != "paragraph" && c.ChunkType != "section" {
+			fmt.Fprintf(&b, " | [%s]", c.ChunkType)
 		}
 		b.WriteString(" ---\n")
 		b.WriteString(c.Content)

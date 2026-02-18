@@ -75,7 +75,7 @@ type ChatResponse struct {
 
 // Config configures an LLM provider.
 type Config struct {
-	Provider string `json:"provider"` // ollama, lmstudio, openrouter, openai, groq, xai, custom
+	Provider string `json:"provider"` // ollama, lmstudio, openrouter, openai, groq, xai, gemini, custom
 	Model    string `json:"model"`
 	BaseURL  string `json:"base_url"`
 	APIKey   string `json:"api_key"`
@@ -96,6 +96,8 @@ func NewProvider(cfg Config) (Provider, error) {
 		return NewGroq(cfg), nil
 	case "xai":
 		return NewXAI(cfg), nil
+	case "gemini":
+		return NewGemini(cfg), nil
 	case "custom":
 		return NewOpenAICompat(cfg), nil
 	case "":

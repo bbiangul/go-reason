@@ -23,3 +23,7 @@ func (p *xaiProvider) Chat(ctx context.Context, req ChatRequest) (*ChatResponse,
 func (p *xaiProvider) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	return p.base.embed(ctx, texts)
 }
+
+func (p *xaiProvider) ChatWithImages(ctx context.Context, req VisionChatRequest) (*ChatResponse, error) {
+	return p.base.chatWithImages(ctx, req)
+}

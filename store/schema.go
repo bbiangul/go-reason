@@ -116,6 +116,21 @@ CREATE TABLE IF NOT EXISTS query_log (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Chunk-associated images (extracted during parsing)
+CREATE TABLE IF NOT EXISTS chunk_images (
+    id INTEGER PRIMARY KEY,
+    chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+    document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    caption TEXT,
+    mime_type TEXT NOT NULL,
+    width INTEGER,
+    height INTEGER,
+    page_number INTEGER,
+    data BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chunk_images_chunk ON chunk_images(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_chunk_images_document ON chunk_images(document_id);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_parent ON chunks(parent_chunk_id);

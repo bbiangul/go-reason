@@ -9,17 +9,34 @@ import (
 	"time"
 
 	"github.com/bbiangul/go-reason"
+	"github.com/bbiangul/go-reason/llm"
 	"github.com/bbiangul/go-reason/retrieval"
 )
 
 // Evaluator runs evaluation test sets against a GoReason engine.
 type Evaluator struct {
-	engine goreason.Engine
+	engine      goreason.Engine
+	groundTruth map[string][]GroundTruthSpan // query -> spans (for retrieval P@k/R@k)
+	judgeLLM    llm.Provider
+	judgeModel  string
 }
 
 // NewEvaluator creates a new evaluator.
 func NewEvaluator(engine goreason.Engine) *Evaluator {
 	return &Evaluator{engine: engine}
+}
+
+// SetGroundTruth sets ground-truth spans for retrieval P@k/R@k computation.
+// The map key is the query string.
+func (e *Evaluator) SetGroundTruth(gt map[string][]GroundTruthSpan) {
+	e.groundTruth = gt
+}
+
+// SetJudge configures an LLM judge for semantic accuracy evaluation.
+// When set, accuracy is computed via LLM instead of verbatim substring matching.
+func (e *Evaluator) SetJudge(provider llm.Provider, model string) {
+	e.judgeLLM = provider
+	e.judgeModel = model
 }
 
 // Report holds the results of an evaluation run.
@@ -48,10 +65,16 @@ type AggregateMetrics struct {
 	AvgFaithfulness        float64 `json:"avg_faithfulness"`
 	AvgRelevance           float64 `json:"avg_relevance"`
 	AvgAccuracy            float64 `json:"avg_accuracy"`
+	AvgStrictAccuracy      float64 `json:"avg_strict_accuracy"`
+	AvgContextRecall       float64 `json:"avg_context_recall"`
 	AvgCitationQuality     float64 `json:"avg_citation_quality"`
 	AvgConfidence          float64 `json:"avg_confidence"`
 	AvgClaimGrounding      float64 `json:"avg_claim_grounding"`
 	AvgHallucinationScore  float64 `json:"avg_hallucination_score"`
+
+	// Retrieval metrics (populated when ground-truth spans are available)
+	AvgRetrievalPrecision map[int]float64 `json:"avg_retrieval_precision,omitempty"` // k -> P@k
+	AvgRetrievalRecall    map[int]float64 `json:"avg_retrieval_recall,omitempty"`    // k -> R@k
 }
 
 // TestResult holds the result of a single test case with full diagnostics.
@@ -65,6 +88,8 @@ type TestResult struct {
 	Faithfulness     float64  `json:"faithfulness"`
 	Relevance        float64  `json:"relevance"`
 	Accuracy         float64  `json:"accuracy"`
+	StrictAccuracy   float64  `json:"strict_accuracy"`
+	ContextRecall    float64  `json:"context_recall"`
 	CitationQuality    float64  `json:"citation_quality"`
 	ClaimGrounding     float64  `json:"claim_grounding"`
 	HallucinationScore float64  `json:"hallucination_score"`
@@ -88,6 +113,10 @@ type TestResult struct {
 
 	// Ground truth diagnosis
 	GroundTruth *GroundTruthCheck `json:"ground_truth,omitempty"`
+
+	// Retrieval metrics (populated when ground-truth spans are available)
+	RetrievalPrecision map[int]float64 `json:"retrieval_precision,omitempty"` // k -> P@k
+	RetrievalRecall    map[int]float64 `json:"retrieval_recall,omitempty"`    // k -> R@k
 }
 
 // SourceTrace records a single retrieved chunk with its retrieval metadata.
@@ -162,6 +191,11 @@ func (e *Evaluator) Run(ctx context.Context, dataset Dataset, opts ...goreason.Q
 	catSums := make(map[string]AggregateMetrics)
 	metricsCount := 0
 
+	// Retrieval metric accumulators
+	retPrecisionSums := make(map[int]float64)
+	retRecallSums := make(map[int]float64)
+	retMetricsCount := 0
+
 	for i, test := range dataset.Tests {
 		result := e.runTest(ctx, test, opts...)
 		report.Results = append(report.Results, result)
@@ -210,10 +244,21 @@ func (e *Evaluator) Run(ctx context.Context, dataset Dataset, opts ...goreason.Q
 		report.Metrics.AvgFaithfulness += result.Faithfulness
 		report.Metrics.AvgRelevance += result.Relevance
 		report.Metrics.AvgAccuracy += result.Accuracy
+		report.Metrics.AvgStrictAccuracy += result.StrictAccuracy
+		report.Metrics.AvgContextRecall += result.ContextRecall
 		report.Metrics.AvgCitationQuality += result.CitationQuality
 		report.Metrics.AvgConfidence += result.Confidence
 		report.Metrics.AvgClaimGrounding += result.ClaimGrounding
 		report.Metrics.AvgHallucinationScore += result.HallucinationScore
+
+		// Accumulate retrieval metrics
+		if result.RetrievalPrecision != nil {
+			retMetricsCount++
+			for _, k := range RetrievalKValues {
+				retPrecisionSums[k] += result.RetrievalPrecision[k]
+				retRecallSums[k] += result.RetrievalRecall[k]
+			}
+		}
 
 		// Per-category accumulation
 		if test.Category != "" {
@@ -222,6 +267,8 @@ func (e *Evaluator) Run(ctx context.Context, dataset Dataset, opts ...goreason.Q
 			sum.AvgFaithfulness += result.Faithfulness
 			sum.AvgRelevance += result.Relevance
 			sum.AvgAccuracy += result.Accuracy
+			sum.AvgStrictAccuracy += result.StrictAccuracy
+			sum.AvgContextRecall += result.ContextRecall
 			sum.AvgCitationQuality += result.CitationQuality
 			sum.AvgConfidence += result.Confidence
 			sum.AvgClaimGrounding += result.ClaimGrounding
@@ -235,10 +282,23 @@ func (e *Evaluator) Run(ctx context.Context, dataset Dataset, opts ...goreason.Q
 		report.Metrics.AvgFaithfulness /= n
 		report.Metrics.AvgRelevance /= n
 		report.Metrics.AvgAccuracy /= n
+		report.Metrics.AvgStrictAccuracy /= n
+		report.Metrics.AvgContextRecall /= n
 		report.Metrics.AvgCitationQuality /= n
 		report.Metrics.AvgConfidence /= n
 		report.Metrics.AvgClaimGrounding /= n
 		report.Metrics.AvgHallucinationScore /= n
+	}
+
+	// Compute retrieval metric averages
+	if retMetricsCount > 0 {
+		rn := float64(retMetricsCount)
+		report.Metrics.AvgRetrievalPrecision = make(map[int]float64)
+		report.Metrics.AvgRetrievalRecall = make(map[int]float64)
+		for _, k := range RetrievalKValues {
+			report.Metrics.AvgRetrievalPrecision[k] = retPrecisionSums[k] / rn
+			report.Metrics.AvgRetrievalRecall[k] = retRecallSums[k] / rn
+		}
 	}
 
 	// Compute per-category averages
@@ -249,6 +309,8 @@ func (e *Evaluator) Run(ctx context.Context, dataset Dataset, opts ...goreason.Q
 			AvgFaithfulness:       sum.AvgFaithfulness / cn,
 			AvgRelevance:          sum.AvgRelevance / cn,
 			AvgAccuracy:           sum.AvgAccuracy / cn,
+			AvgStrictAccuracy:     sum.AvgStrictAccuracy / cn,
+			AvgContextRecall:      sum.AvgContextRecall / cn,
 			AvgCitationQuality:    sum.AvgCitationQuality / cn,
 			AvgConfidence:         sum.AvgConfidence / cn,
 			AvgClaimGrounding:     sum.AvgClaimGrounding / cn,
@@ -285,16 +347,34 @@ func (e *Evaluator) runTest(ctx context.Context, test TestCase, opts ...goreason
 	// Compute metrics
 	result.Faithfulness = computeFaithfulness(answer)
 	result.Relevance = computeRelevance(answer, test.Question)
-	result.Accuracy = computeAccuracy(answer, test.ExpectedFacts)
+
+	// Always compute strict (verbatim) accuracy
+	strictAcc := computeAccuracy(answer, test.ExpectedFacts)
+	result.StrictAccuracy = strictAcc
+	result.Accuracy = strictAcc
+
+	// If judge is configured, use LLM-based accuracy instead
+	if e.judgeLLM != nil {
+		llmAcc, err := computeAccuracyLLM(ctx, e.judgeLLM, e.judgeModel, answer, test.ExpectedFacts)
+		if err != nil {
+			slog.Warn("judge LLM failed, falling back to strict accuracy",
+				"error", err,
+				"question", truncate(test.Question, 60))
+		} else {
+			result.Accuracy = llmAcc
+		}
+	}
+
+	result.ContextRecall = computeContextRecall(answer, test.ExpectedFacts)
 	result.CitationQuality = computeCitationQuality(answer)
 	result.ClaimGrounding = computeClaimGrounding(answer)
 	result.HallucinationScore = computeHallucinationScore(answer)
 
-	// A test passes if accuracy >= 0.5 and faithfulness >= 0.5.
-	// HallucinationScore is tracked as an informational metric for analysis
-	// but not used as a pass gate — it has too many false positives on correct
-	// answers that quote technical source material.
-	result.Passed = result.Accuracy >= 0.5 && result.Faithfulness >= 0.5
+	// A test passes if:
+	// 1. The engine retrieved chunks containing the evidence (ContextRecall >= 0.5)
+	// 2. The model extracted the facts from those chunks (Accuracy >= 0.5)
+	// This replaces the weak Faithfulness gate with direct retrieval quality measurement.
+	result.Passed = result.Accuracy >= 0.5 && result.ContextRecall >= 0.5
 
 	// Build source traces from answer
 	result.Sources = buildSourceTraces(answer)
@@ -309,6 +389,16 @@ func (e *Evaluator) runTest(ctx context.Context, test TestCase, opts ...goreason
 
 	// Run ground truth diagnosis
 	result.GroundTruth = e.runGroundTruthCheck(ctx, test, answer)
+
+	// Compute retrieval P@k/R@k if ground-truth spans are available
+	if spans, ok := e.groundTruth[test.Question]; ok && len(spans) > 0 {
+		result.RetrievalPrecision = make(map[int]float64)
+		result.RetrievalRecall = make(map[int]float64)
+		for _, k := range RetrievalKValues {
+			result.RetrievalPrecision[k] = computeRetrievalPrecisionAtK(answer, spans, k)
+			result.RetrievalRecall[k] = computeRetrievalRecallAtK(answer, spans, k)
+		}
+	}
 
 	result.ElapsedMs = time.Since(testStart).Milliseconds()
 
@@ -539,10 +629,30 @@ func FormatReport(r *Report) string {
 	fmt.Fprintf(&b, "  Faithfulness:         %.2f\n", r.Metrics.AvgFaithfulness)
 	fmt.Fprintf(&b, "  Relevance:            %.2f\n", r.Metrics.AvgRelevance)
 	fmt.Fprintf(&b, "  Accuracy:             %.2f\n", r.Metrics.AvgAccuracy)
+	if r.Metrics.AvgStrictAccuracy != r.Metrics.AvgAccuracy {
+		fmt.Fprintf(&b, "  Strict Accuracy:      %.2f\n", r.Metrics.AvgStrictAccuracy)
+	}
+	fmt.Fprintf(&b, "  Context Recall:       %.2f\n", r.Metrics.AvgContextRecall)
 	fmt.Fprintf(&b, "  Citation Quality:     %.2f\n", r.Metrics.AvgCitationQuality)
 	fmt.Fprintf(&b, "  Claim Grounding:      %.2f\n", r.Metrics.AvgClaimGrounding)
 	fmt.Fprintf(&b, "  Hallucination Score:  %.2f\n", r.Metrics.AvgHallucinationScore)
 	fmt.Fprintf(&b, "  Confidence:           %.2f\n\n", r.Metrics.AvgConfidence)
+
+	// Retrieval metrics (if available)
+	if len(r.Metrics.AvgRetrievalPrecision) > 0 {
+		fmt.Fprintf(&b, "Retrieval Metrics:\n")
+		for _, k := range RetrievalKValues {
+			if p, ok := r.Metrics.AvgRetrievalPrecision[k]; ok {
+				fmt.Fprintf(&b, "  P@%-3d  %.1f%%\n", k, p*100)
+			}
+		}
+		for _, k := range RetrievalKValues {
+			if recall, ok := r.Metrics.AvgRetrievalRecall[k]; ok {
+				fmt.Fprintf(&b, "  R@%-3d  %.1f%%\n", k, recall*100)
+			}
+		}
+		fmt.Fprintln(&b)
+	}
 
 	fmt.Fprintf(&b, "Token Usage:\n")
 	fmt.Fprintf(&b, "  Prompt:     %d\n", r.TokenUsage.PromptTokens)
@@ -561,8 +671,8 @@ func FormatReport(r *Report) string {
 		for _, cat := range cats {
 			m := r.CategoryMetrics[cat]
 			fmt.Fprintf(&b, "  [%s]\n", cat)
-			fmt.Fprintf(&b, "    Faith=%.2f Rel=%.2f Acc=%.2f Cite=%.2f Grnd=%.2f Hall=%.2f Conf=%.2f\n",
-				m.AvgFaithfulness, m.AvgRelevance, m.AvgAccuracy, m.AvgCitationQuality,
+			fmt.Fprintf(&b, "    Faith=%.2f Rel=%.2f Acc=%.2f CtxR=%.2f Cite=%.2f Grnd=%.2f Hall=%.2f Conf=%.2f\n",
+				m.AvgFaithfulness, m.AvgRelevance, m.AvgAccuracy, m.AvgContextRecall, m.AvgCitationQuality,
 				m.AvgClaimGrounding, m.AvgHallucinationScore, m.AvgConfidence)
 		}
 		fmt.Fprintln(&b)
@@ -581,9 +691,12 @@ func FormatReport(r *Report) string {
 		if res.Error != "" {
 			fmt.Fprintf(&b, "  Error: %s\n", res.Error)
 		} else {
-			fmt.Fprintf(&b, "  Faith=%.2f Rel=%.2f Acc=%.2f Cite=%.2f Grnd=%.2f Hall=%.2f Conf=%.2f  (%dms)\n",
-				res.Faithfulness, res.Relevance, res.Accuracy, res.CitationQuality,
+			fmt.Fprintf(&b, "  Faith=%.2f Rel=%.2f Acc=%.2f CtxR=%.2f Cite=%.2f Grnd=%.2f Hall=%.2f Conf=%.2f  (%dms)\n",
+				res.Faithfulness, res.Relevance, res.Accuracy, res.ContextRecall, res.CitationQuality,
 				res.ClaimGrounding, res.HallucinationScore, res.Confidence, res.ElapsedMs)
+			if res.StrictAccuracy != res.Accuracy {
+				fmt.Fprintf(&b, "  StrictAcc=%.2f\n", res.StrictAccuracy)
+			}
 		}
 	}
 

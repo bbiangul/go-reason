@@ -58,6 +58,33 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version:     4,
+		description: "add chunk_images table for storing extracted document images",
+		apply: func(tx *sql.Tx) error {
+			stmts := []string{
+				`CREATE TABLE IF NOT EXISTS chunk_images (
+					id INTEGER PRIMARY KEY,
+					chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+					document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+					caption TEXT,
+					mime_type TEXT NOT NULL,
+					width INTEGER,
+					height INTEGER,
+					page_number INTEGER,
+					data BLOB NOT NULL
+				)`,
+				"CREATE INDEX IF NOT EXISTS idx_chunk_images_chunk ON chunk_images(chunk_id)",
+				"CREATE INDEX IF NOT EXISTS idx_chunk_images_document ON chunk_images(document_id)",
+			}
+			for _, stmt := range stmts {
+				if _, err := tx.Exec(stmt); err != nil {
+					slog.Debug("migration 4: statement may already be applied", "sql", stmt, "error", err)
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // Migrate runs all pending schema migrations.

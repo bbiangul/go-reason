@@ -43,14 +43,30 @@ func (c *Chunker) Chunk(sections []parser.Section) []store.Chunk {
 	var chunks []store.Chunk
 	pos := 0
 	for _, sec := range sections {
-		c.processSection(sec, nil, &chunks, &pos)
+		c.processSection(sec, nil, &chunks, &pos, -1, nil)
 	}
 	return chunks
 }
 
+// ChunkWithSectionMap converts parsed sections into store chunks and returns
+// a parallel slice mapping each chunk index to its originating top-level
+// section index. This enables callers to associate per-section data (e.g.
+// images) with the correct chunk IDs after insertion.
+func (c *Chunker) ChunkWithSectionMap(sections []parser.Section) ([]store.Chunk, []int) {
+	var chunks []store.Chunk
+	var sectionMap []int
+	pos := 0
+	for i, sec := range sections {
+		c.processSection(sec, nil, &chunks, &pos, i, &sectionMap)
+	}
+	return chunks, sectionMap
+}
+
 // processSection recursively converts a parser.Section (and its children)
 // into one parent chunk plus zero or more child chunks.
-func (c *Chunker) processSection(sec parser.Section, parentPos *int64, chunks *[]store.Chunk, pos *int) {
+// When sectionIdx >= 0 and sectionMap is non-nil, each chunk's originating
+// top-level section index is recorded.
+func (c *Chunker) processSection(sec parser.Section, parentPos *int64, chunks *[]store.Chunk, pos *int, sectionIdx int, sectionMap *[]int) {
 	// --- parent chunk ---
 	parentContent := buildParentContent(sec)
 	parentMeta := marshalMeta(sec.Metadata)
@@ -70,6 +86,9 @@ func (c *Chunker) processSection(sec parser.Section, parentPos *int64, chunks *[
 		ContentHash:   parentHash,
 	}
 	*chunks = append(*chunks, parent)
+	if sectionMap != nil {
+		*sectionMap = append(*sectionMap, sectionIdx)
+	}
 	*pos++
 
 	// --- child chunks from content ---
@@ -90,13 +109,16 @@ func (c *Chunker) processSection(sec parser.Section, parentPos *int64, chunks *[
 				ContentHash:   childHash,
 			}
 			*chunks = append(*chunks, child)
+			if sectionMap != nil {
+				*sectionMap = append(*sectionMap, sectionIdx)
+			}
 			*pos++
 		}
 	}
 
 	// --- recurse into child sections ---
 	for _, child := range sec.Children {
-		c.processSection(child, &parentIndex, chunks, pos)
+		c.processSection(child, &parentIndex, chunks, pos, sectionIdx, sectionMap)
 	}
 }
 
